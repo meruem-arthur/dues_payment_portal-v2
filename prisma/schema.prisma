@@ -1,0 +1,405 @@
+// ============================================================
+// UMaT Multi-Department Student Payment Platform - Prisma Schema
+// ============================================================
+// Design principle: every department-scoped model carries a
+// departmentId foreign key. Isolation is enforced in application
+// code (src/lib/authorization.ts), never assumed from the schema
+// alone, but the FK guarantees referential integrity.
+//
+// Departments are never hard-deleted (see Department.status). No
+// relation below cascades on department delete - payment, receipt,
+// student and audit history must survive a department being taken
+// out of active use. The Postgres default (RESTRICT) applies instead,
+// so an accidental raw DELETE on a department with history simply fails.
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------
+// Enums
+// ------------------------------------------------------------
+
+enum Role {
+  SUPER_ADMIN
+  DEPARTMENT_ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum SessionStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum DepartmentStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum PaymentProviderType {
+  PAYSTACK
+  HUBTEL
+}
+
+enum ProviderEnvironment {
+  TEST
+  LIVE
+}
+
+enum StudentLevel {
+  L100
+  L200
+  L300
+  L400
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentType {
+  FRESHER
+  CONTINUING
+}
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// ------------------------------------------------------------
+// Core identity / tenancy models
+// ------------------------------------------------------------
+
+model AcademicSession {
+  id        String        @id @default(cuid())
+  name      String        @unique // e.g. "2026/2027"
+  startDate DateTime
+  endDate   DateTime
+  status    SessionStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  departments Department[]
+  students    Student[]
+  payments    Payment[]
+
+  @@map("academic_sessions")
+}
+
+model Department {
+  id                 String   @id @default(cuid())
+  name               String
+  code               String // short code e.g. "GESA"
+  description        String?
+  academicSessionId  String
+  academicSession    AcademicSession @relation(fields: [academicSessionId], references: [id])
+
+  fresherAmount      Decimal  @db.Decimal(10, 2)
+  continuingAmount   Decimal  @db.Decimal(10, 2)
+
+  contactEmail       String?
+  contactPhone       String?
+  slug               String   @unique // used in public payment URL /d/[slug]
+
+  // Small circular logo shown under the department name on the public
+  // student payment page. Stored as a data URL (no external object storage
+  // configured for this project) - kept optional and simply omitted from
+  // the page entirely when null, per department.
+  logoUrl            String?
+
+  // Departments are never hard-deleted: payment records are financial
+  // history and must survive department removal from the active system.
+  // "Deleting" a department in the UI archives it instead - it disappears
+  // from active lists/switchers but its data (students, payments, receipts,
+  // audit trail) remains queryable for reporting and compliance.
+  status             DepartmentStatus @default(ACTIVE)
+  archivedAt         DateTime?
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  admins              User[]
+  students             Student[]
+  payments             Payment[]
+  receipts             Receipt[]
+  paymentConfig        PaymentProviderConfiguration?
+  smsConfig            SmsConfiguration?
+  emailConfig          EmailConfiguration?
+  auditLogs            AuditLog[]
+  notificationLogs     NotificationLog[]
+  webhookEvents        WebhookEvent[]
+
+  // Composite uniqueness: department code must be unique per session
+  @@unique([academicSessionId, code])
+  @@map("departments")
+}
+
+model User {
+  id           String        @id @default(cuid())
+  name         String
+  email        String        @unique
+  // Display/reference login handle shown on the department admin card.
+  // Authentication itself is still by email (see src/lib/auth.ts) - adding
+  // a second real login path is out of scope for this phase.
+  username     String?       @unique
+  phone        String?
+  passwordHash String
+  role         Role
+  status       AccountStatus @default(ACTIVE)
+
+  // Only set for DEPARTMENT_ADMIN. SUPER_ADMIN has null departmentId.
+  departmentId String?
+  department   Department?   @relation(fields: [departmentId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs AuditLog[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([departmentId])
+  @@map("users")
+}
+
+model PasswordResetToken {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // The raw token is emailed to the user and never stored - only its SHA-256
+  // hash lives here, same principle as passwordHash on User: a DB leak alone
+  // must not be enough to reset someone's account.
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ------------------------------------------------------------
+// Students
+// ------------------------------------------------------------
+
+model Student {
+  id               String       @id @default(cuid())
+  fullName         String
+  referenceNumber  String // primary payment-matching identifier
+  studentIndexNo   String?
+  level            StudentLevel
+  phone            String
+  email            String?
+
+  departmentId      String
+  department        Department      @relation(fields: [departmentId], references: [id])
+  academicSessionId String
+  academicSession   AcademicSession @relation(fields: [academicSessionId], references: [id])
+
+  paymentStatus PaymentStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments Payment[]
+  receipts Receipt[]
+
+  // Reference number must be unique within a department + session, NOT globally,
+  // and never derived from name matching.
+  @@unique([departmentId, academicSessionId, referenceNumber])
+  @@index([departmentId, level])
+  @@index([departmentId, paymentStatus])
+  @@map("students")
+}
+
+// ------------------------------------------------------------
+// Payments / Receipts
+// ------------------------------------------------------------
+
+model Payment {
+  id            String        @id @default(cuid())
+  studentId     String
+  student       Student       @relation(fields: [studentId], references: [id])
+  departmentId  String
+  department    Department    @relation(fields: [departmentId], references: [id])
+  academicSessionId String
+  academicSession AcademicSession @relation(fields: [academicSessionId], references: [id])
+
+  provider           PaymentProviderType
+  providerTxId        String? // provider's transaction reference, set on confirmation
+  internalReference    String  @unique // generated by us at initiation time, sent as provider metadata
+
+  amount        Decimal       @db.Decimal(10, 2)
+  currency      String        @default("GHS")
+  paymentType   PaymentType
+  status        PaymentStatus @default(PENDING)
+
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  receipt       Receipt?
+  webhookEvents WebhookEvent[]
+
+  @@index([departmentId, status])
+  @@index([providerTxId])
+  @@map("payments")
+}
+
+model Receipt {
+  id             String   @id @default(cuid())
+  receiptNumber  String   @unique // e.g. REC-2026-000001
+  paymentId      String   @unique
+  payment        Payment  @relation(fields: [paymentId], references: [id])
+  studentId      String
+  student        Student  @relation(fields: [studentId], references: [id])
+  departmentId   String
+  department     Department @relation(fields: [departmentId], references: [id])
+
+  issuedAt DateTime @default(now())
+
+  @@map("receipts")
+}
+
+// ------------------------------------------------------------
+// Per-department provider configuration
+// ------------------------------------------------------------
+
+model PaymentProviderConfiguration {
+  id            String              @id @default(cuid())
+  departmentId  String              @unique
+  department    Department          @relation(fields: [departmentId], references: [id])
+
+  provider      PaymentProviderType @default(PAYSTACK)
+  environment   ProviderEnvironment @default(TEST)
+
+  // Secrets are stored server-side only and never returned to the frontend.
+  publicKey     String?
+  secretKey     String? // should be encrypted at rest in production; MVP stores as text via env-backed secret store
+  webhookSecret String?
+
+  // Free-form "Payment Link / Configuration" value from the department setup
+  // form. Its meaning is entirely up to the chosen provider's adapter (e.g.
+  // a Paystack subaccount/split code, or a Hubtel POS Sales ID / receiver
+  // number) - this table and the rest of the app never interpret it, only
+  // the matching class in src/lib/payments/ does.
+  configValue   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payment_provider_configurations")
+}
+
+model SmsConfiguration {
+  id            String     @id @default(cuid())
+  departmentId  String     @unique
+  department    Department @relation(fields: [departmentId], references: [id])
+
+  senderId        String  @default("UMAT")
+  messageTemplate String  @default("Name : {name}\nRef No. : {reference}\nLevel : {level}\nPayment confirmed for {department} dues.\nReceipt No: {receipt}")
+  apiKey          String?
+  username        String?
+  enabled         Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("sms_configurations")
+}
+
+model EmailConfiguration {
+  id           String     @id @default(cuid())
+  departmentId String     @unique
+  department   Department @relation(fields: [departmentId], references: [id])
+
+  fromAddress  String?
+  emailTemplate String @default("Dear {name}, your payment of {amount} for {department} was successful. Reference: {reference}. Receipt: {receipt}.")
+  enabled      Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("email_configurations")
+}
+
+// ------------------------------------------------------------
+// Webhooks / notifications / audit
+// ------------------------------------------------------------
+
+model WebhookEvent {
+  id            String   @id @default(cuid())
+  departmentId  String
+  department    Department @relation(fields: [departmentId], references: [id])
+  paymentId     String?
+  payment       Payment? @relation(fields: [paymentId], references: [id])
+
+  provider          PaymentProviderType
+  providerEventId   String // used for idempotency - unique per provider event
+  rawPayload        Json
+  processed         Boolean @default(false)
+  receivedAt        DateTime @default(now())
+
+  // Idempotency guarantee: the same provider event can only be recorded once.
+  @@unique([provider, providerEventId])
+  @@map("webhook_events")
+}
+
+model NotificationLog {
+  id           String              @id @default(cuid())
+  departmentId String
+  department   Department          @relation(fields: [departmentId], references: [id])
+  channel      NotificationChannel
+  recipient    String
+  status       NotificationStatus  @default(PENDING)
+  errorMessage String?
+  relatedPaymentId String?
+
+  createdAt DateTime @default(now())
+
+  @@map("notification_logs")
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id])
+  departmentId String?
+  // Explicit Restrict (not the SetNull that Prisma would otherwise infer for
+  // an optional relation): a department with audit history must never be
+  // deletable, full stop - archiving is the only path.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+
+  action    String // e.g. "STUDENT_CREATED", "DEPARTMENT_DELETED"
+  entity    String // e.g. "Student", "Department"
+  entityId  String?
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([departmentId])
+  @@map("audit_logs")
+}

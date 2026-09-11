@@ -1,0 +1,247 @@
+import { NextRequest, NextResponse } from "next/server";
+import { captureError } from "@/lib/monitoring/capture-error";
+import { prisma } from "@/lib/db";
+import { getPaymentProvider } from "@/lib/payments/provider-factory";
+import { PENDING_PAYMENT_STALE_AFTER_MS } from "@/lib/payments/constants";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
+import { logAudit } from "@/lib/audit";
+import { z } from "zod";
+
+const initiateSchema = z.object({
+  departmentSlug: z.string(),
+  paymentType: z.enum(["FRESHER", "CONTINUING"]),
+  referenceNumber: z.string().min(1),
+  phone: z.string().min(9),
+  email: z.string().email().optional(),
+  // Only ever collected on the FRESHER form, and only actually required
+  // when we're about to self-register a brand-new student below - an
+  // already-registered fresher paying again with a known reference number
+  // shouldn't be blocked just because the client didn't resend a name.
+  // Validated at that point instead of here, since whether it's needed
+  // depends on a DB lookup this schema can't see.
+  fullName: z.string().min(2).optional(),
+});
+
+// This is the one fully public, unauthenticated endpoint in the app -
+// anyone can call it without logging in, so it's the one most exposed to a
+// script hammering reference numbers or repeatedly calling out to the
+// payment provider's API on our dime. 8 requests / 10 minutes per IP is
+// generous enough for a genuine student retrying a typo or a slow network,
+// while still shutting down scripted abuse.
+const RATE_LIMIT_MAX_REQUESTS = 8;
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
+// Public endpoint - no session required. Students are matched by reference
+// number, never by name. Amount is always taken from department config,
+// never from client input, to prevent tampering.
+export async function POST(req: NextRequest) {
+  try {
+    const ip = getClientIp(req);
+    const rateLimit = checkRateLimit(`payments:initiate:${ip}`, RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: "Too many attempts. Please wait a few minutes and try again." },
+        { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } }
+      );
+    }
+
+    const body = await req.json();
+    const input = initiateSchema.parse(body);
+
+    const department = await prisma.department.findUnique({
+      where: { slug: input.departmentSlug },
+      include: { paymentConfig: true, academicSession: true },
+    });
+    if (!department) return NextResponse.json({ error: "Department not found" }, { status: 404 });
+    if (department.status === "ARCHIVED") {
+      return NextResponse.json({ error: "This department is no longer accepting payments" }, { status: 410 });
+    }
+    // "Configured" is deliberately provider-agnostic: some providers need a
+    // secret key, some need a configValue (e.g. Hubtel's merchant account
+    // number), some need both. The adapter itself throws a specific error
+    // if something it actually requires is missing.
+    if (!department.paymentConfig?.secretKey && !department.paymentConfig?.configValue) {
+      return NextResponse.json({ error: "This department has not configured payments yet" }, { status: 400 });
+    }
+
+    let student = await prisma.student.findFirst({
+      where: {
+        departmentId: department.id,
+        academicSessionId: department.academicSessionId,
+        referenceNumber: input.referenceNumber,
+      },
+    });
+
+    if (!student) {
+      // Continuing students are always pre-loaded by the department (CSV
+      // import / seed) ahead of time, so a missing record is a genuine
+      // "check your reference number" error - never self-register here.
+      if (input.paymentType !== "FRESHER") {
+        return NextResponse.json({ error: "No student found with that reference number in this department" }, { status: 404 });
+      }
+
+      // Freshers aren't pre-loaded: department admins typically don't have
+      // admission data for the new intake yet when the semester's dues
+      // collection opens. So the first fresher payment attempt with a given
+      // reference number registers that student, using what they entered
+      // on the pay form, instead of rejecting them outright.
+      if (!input.fullName?.trim()) {
+        return NextResponse.json({ error: "Full name is required" }, { status: 400 });
+      }
+
+      try {
+        student = await prisma.student.create({
+          data: {
+            departmentId: department.id,
+            academicSessionId: department.academicSessionId,
+            referenceNumber: input.referenceNumber,
+            fullName: input.fullName!.trim(),
+            level: "L100",
+            phone: input.phone,
+            email: input.email || null,
+          },
+        });
+      } catch (createErr) {
+        // Race: two requests with the same reference number both passed the
+        // findFirst above before either committed. The DB's unique
+        // constraint on (departmentId, academicSessionId, referenceNumber)
+        // catches it - surface it as the same "already exists" error the
+        // admin-side manual-add flow uses, not a raw 500.
+        if ((createErr as { code?: string }).code === "P2002") {
+          return NextResponse.json(
+            { error: "A student with that reference number already exists. Please check your reference number and try again." },
+            { status: 409 }
+          );
+        }
+        throw createErr;
+      }
+
+      await logAudit({
+        departmentId: department.id,
+        action: "STUDENT_SELF_REGISTERED",
+        entity: "Student",
+        entityId: student.id,
+        metadata: { referenceNumber: student.referenceNumber, source: "public-payment-form" },
+      });
+    }
+
+    // We don't do refunds, so a student who has already paid must never be
+    // able to start a second payment flow - whether that's a double-click,
+    // reopening an old link after paying, or a parent scanning the same QR
+    // code the student already used.
+    if (student.paymentStatus === "SUCCESS") {
+      return NextResponse.json(
+        { error: "You've already paid — check your SMS for your receipt." },
+        { status: 409 }
+      );
+    }
+
+    // Guard against a second payment flow starting while an earlier one is
+    // still in progress (e.g. a double-click before the first request even
+    // returns, or reopening the pay form seconds later). Only a RECENT
+    // pending payment blocks a retry - once it's older than the stale-payment
+    // cutoff it's treated as abandoned, matches what the expiry sweep in
+    // /api/payments/expire-stale will clean up, and no longer blocks anything.
+    const recentPendingPayment = await prisma.payment.findFirst({
+      where: {
+        studentId: student.id,
+        status: "PENDING",
+        createdAt: { gt: new Date(Date.now() - PENDING_PAYMENT_STALE_AFTER_MS) },
+      },
+      select: { id: true },
+    });
+    if (recentPendingPayment) {
+      return NextResponse.json(
+        {
+          error:
+            "You already have a payment in progress. Please wait a few minutes and check your SMS, or try again shortly.",
+        },
+        { status: 409 }
+      );
+    }
+
+    // A student's true payment type is derived from their level, never from
+    // whichever link/QR they happened to click. L100 = Fresher, everything
+    // else (L200-L400) = Continuing. Reject before any payment record or
+    // provider call is made, since we don't do refunds.
+    const expectedPaymentType = student.level === "L100" ? "FRESHER" : "CONTINUING";
+    if (input.paymentType !== expectedPaymentType) {
+      const message =
+        expectedPaymentType === "FRESHER"
+          ? "You're registered as a Level 100 student — use the First Year link"
+          : "You're registered as a continuing student - use the continuing student link";
+      return NextResponse.json({ error: message }, { status: 409 });
+    }
+
+    const amount =
+      input.paymentType === "FRESHER" ? Number(department.fresherAmount) : Number(department.continuingAmount);
+
+    const internalReference = `PAY-${department.code}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const pendingPayment = await prisma.payment.create({
+      data: {
+        studentId: student.id,
+        departmentId: department.id,
+        academicSessionId: department.academicSessionId,
+        provider: department.paymentConfig.provider,
+        internalReference,
+        amount,
+        currency: "GHS",
+        paymentType: input.paymentType,
+        status: "PENDING",
+      },
+    });
+
+    const provider = getPaymentProvider(department.paymentConfig.provider as "PAYSTACK" | "HUBTEL");
+    const paymentConfig = decryptPaymentSecrets(department.paymentConfig);
+
+    // The PENDING row above is committed before we ever talk to the
+    // provider, so a failure past this point must not leave it behind as a
+    // fake "in progress" payment - that's what was blocking retries with
+    // "You already have a payment in progress" even though nothing was
+    // actually in progress on Paystack/Hubtel's side. Any throw from here
+    // is caught, the row is flipped to FAILED so the guard above stops
+    // seeing it, and the ORIGINAL error still propagates to the outer
+    // catch so the response and logging behavior are unchanged.
+    let result;
+    try {
+      result = await provider.initiatePayment(
+        {
+          amount,
+          currency: "GHS",
+          email: input.email,
+          phone: input.phone,
+          internalReference,
+          metadata: {
+            studentReference: student.referenceNumber,
+            departmentId: department.id,
+            academicSessionId: department.academicSessionId,
+            studentId: student.id,
+            paymentType: input.paymentType,
+          },
+          callbackUrl: `${process.env.NEXT_PUBLIC_APP_URL}/d/${department.slug}/payment-status?ref=${internalReference}`,
+        },
+        {
+          publicKey: paymentConfig.publicKey,
+          secretKey: paymentConfig.secretKey,
+          webhookSecret: paymentConfig.webhookSecret,
+          configValue: paymentConfig.configValue,
+          environment: paymentConfig.environment,
+        }
+      );
+    } catch (providerErr) {
+      await prisma.payment.update({
+        where: { id: pendingPayment.id },
+        data: { status: "FAILED" },
+      });
+      throw providerErr;
+    }
+
+    return NextResponse.json({ authorizationUrl: result.authorizationUrl, paymentId: pendingPayment.id });
+  } catch (err) {
+    captureError(err);
+    // Never leak internal error/stack details to the public.
+    return NextResponse.json({ error: "Could not initiate payment. Please try again." }, { status: 500 });
+  }
+}
