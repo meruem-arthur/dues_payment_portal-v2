@@ -7,6 +7,7 @@ async function main() {
   console.log("Seeding development data...");
 
   const passwordHash = await bcrypt.hash("Password123!", 10);
+  const superAdminPasswordHash = await bcrypt.hash("Bond442@love1", 10);
 
   const session = await prisma.academicSession.upsert({
     where: { name: "2026/2027" },
@@ -20,12 +21,12 @@ async function main() {
   });
 
   const superAdmin = await prisma.user.upsert({
-    where: { email: "superadmin@umat.test" },
+    where: { email: "meruemarthur@gmail.com" },
     update: {},
     create: {
-      name: "Super Admin",
-      email: "superadmin@umat.test",
-      passwordHash,
+      name: "Meruem",
+      email: "meruemarthur@gmail.com",
+      passwordHash: superAdminPasswordHash,
       role: "SUPER_ADMIN",
     },
   });
@@ -95,8 +96,8 @@ async function main() {
   }
 
   console.log("Done.");
-  console.log("Super admin login: superadmin@umat.test / Password123!");
-  console.log("All seeded passwords: Password123!");
+  console.log("Super admin login: meruemarthur@gmail.com / Bond442@love1");
+  console.log("Department admin passwords: Password123!");
 }
 
 main()
