@@ -6,15 +6,23 @@ import { Spinner } from "@/components/ui/spinner";
 export function PayButton({
   departmentSlug,
   paymentType,
+  autoOpen = false,
 }: {
   departmentSlug: string;
   paymentType: "FRESHER" | "CONTINUING";
+  // When the payment form is reached via a `?type=` deep link, the form
+  // itself is the landing page - no reason to make the student click
+  // "Pay Now" first just to see the fields they came here for.
+  autoOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  // Freshers get an extra "confirm" screen before we submit, since a typo'd
-  // reference number for them doesn't fail with "no student found" the way
-  // it does for continuing students - it just registers a new record. This
-  // is their one chance to catch that before it happens.
+  const [open, setOpen] = useState(autoOpen);
+  // Both student types now get a review step before anything is submitted.
+  // Freshers aren't in the database yet, so their review just echoes back
+  // what they typed (their one chance to catch a typo'd reference number
+  // before it self-registers a new record). Continuing students already
+  // exist, so instead of trusting what's typed, "confirm" looks their
+  // record up and shows their real name from the DB - a genuine "is this
+  // you?" check, not just a recap.
   const [step, setStep] = useState<"form" | "confirm">("form");
   const [fullName, setFullName] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
@@ -22,16 +30,39 @@ export function PayButton({
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lookingUp, setLookingUp] = useState(false);
   const isFresher = paymentType === "FRESHER";
 
-  function handleFormSubmit(e: React.FormEvent) {
+  async function handleFormSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+
     if (isFresher) {
       setStep("confirm");
       return;
     }
-    void pay();
+
+    // Continuing: look the student up first so the confirm screen can show
+    // their actual name, not just whatever was typed.
+    setLookingUp(true);
+    try {
+      const res = await fetch("/api/students/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ departmentSlug, paymentType, referenceNumber }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Could not find that reference number");
+        return;
+      }
+      setFullName(data.fullName);
+      setStep("confirm");
+    } catch {
+      setError("Could not look up that reference number. Please try again.");
+    } finally {
+      setLookingUp(false);
+    }
   }
 
   async function pay() {
@@ -62,7 +93,7 @@ export function PayButton({
   }
 
   function reset() {
-    setOpen(false);
+    setOpen(autoOpen);
     setStep("form");
     setError(null);
   }
@@ -82,8 +113,9 @@ export function PayButton({
         <div className="rounded-md border border-portal-border p-3">
           <p className="text-sm font-semibold text-portal-text">Confirm your details</p>
           <p className="mt-1 text-xs text-portal-muted">
-            This creates your student record for {departmentSlug.replace(/-/g, " ")}. Double-check
-            these before you pay - especially your reference number.
+            {isFresher
+              ? `This creates your student record for ${departmentSlug.replace(/-/g, " ")}. Double-check these before you pay - especially your reference number.`
+              : "Continue only if this is you."}
           </p>
           <dl className="mt-3 space-y-1.5 text-sm">
             <div className="flex justify-between gap-3">
@@ -149,9 +181,9 @@ export function PayButton({
         <input className="portal-input" value={email} onChange={(e) => setEmail(e.target.value)} />
       </div>
       <div className="flex flex-col gap-2">
-        <button type="submit" disabled={loading} className="portal-btn-primary flex w-full items-center justify-center gap-2">
-          {loading && <Spinner />}
-          {loading ? "Redirecting..." : isFresher ? "Review Details" : "Continue to Pay"}
+        <button type="submit" disabled={lookingUp} className="portal-btn-primary flex w-full items-center justify-center gap-2">
+          {lookingUp && <Spinner />}
+          {lookingUp ? "Checking..." : "Review Details"}
         </button>
         <button type="button" className="portal-btn-secondary w-full" onClick={reset}>Cancel</button>
       </div>
