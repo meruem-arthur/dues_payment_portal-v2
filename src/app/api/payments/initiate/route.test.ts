@@ -170,6 +170,7 @@ describe("POST /api/payments/initiate", () => {
           referenceNumber: "REF999",
           fullName: "Ama Serwaa",
           level: "L100",
+          registrationSource: "SELF",
         }),
       })
     );
@@ -177,6 +178,70 @@ describe("POST /api/payments/initiate", () => {
       expect.objectContaining({ action: "STUDENT_SELF_REGISTERED" })
     );
     expect(data.authorizationUrl).toBe("https://pay.example/abc");
+  });
+
+  it("rejects a fresher self-registration when the name already exists under a different reference number", async () => {
+    mockedPrisma.student.findFirst
+      .mockResolvedValueOnce(null) // no student under REF999 yet
+      .mockResolvedValueOnce({ id: "existing_student", referenceNumber: "REF001" } as any); // dedupe check hit
+
+    const res = await POST(
+      makeRequest({
+        ...validBody,
+        paymentType: "FRESHER",
+        referenceNumber: "REF999",
+        fullName: "Ama Serwaa",
+      })
+    );
+    const data = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(data.error).toMatch(/already registered/i);
+    expect(mockedPrisma.student.create).not.toHaveBeenCalled();
+  });
+
+  it("dedupe check excludes the student's own reference number from the match", async () => {
+    mockedPrisma.student.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    mockedPrisma.student.create.mockResolvedValue({
+      id: "new_student_1",
+      referenceNumber: "REF999",
+      level: "L100",
+      phone: "0551234567",
+      paymentStatus: "PENDING",
+    } as any);
+
+    const res = await POST(
+      makeRequest({ ...validBody, paymentType: "FRESHER", referenceNumber: "REF999", fullName: "Ama Serwaa" })
+    );
+
+    expect(res.status).toBe(200);
+    const dedupeCallArgs = mockedPrisma.student.findFirst.mock.calls[1][0];
+    expect(dedupeCallArgs.where.referenceNumber).toEqual({ not: "REF999" });
+    expect(dedupeCallArgs.where.fullName).toEqual({ equals: "Ama Serwaa", mode: "insensitive" });
+  });
+
+  it("normalizes extra whitespace in a self-registered fresher's name", async () => {
+    mockedPrisma.student.findFirst.mockResolvedValue(null);
+    mockedPrisma.student.create.mockResolvedValue({
+      id: "new_student_1",
+      referenceNumber: "REF999",
+      level: "L100",
+      phone: "0551234567",
+      paymentStatus: "PENDING",
+    } as any);
+
+    await POST(
+      makeRequest({
+        ...validBody,
+        paymentType: "FRESHER",
+        referenceNumber: "REF999",
+        fullName: "  Ama   Serwaa  ",
+      })
+    );
+
+    expect(mockedPrisma.student.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ fullName: "Ama Serwaa" }) })
+    );
   });
 
   it("rejects a fresher self-registration attempt with no full name", async () => {

@@ -89,6 +89,34 @@ export async function POST(req: NextRequest) {
       if (!input.fullName?.trim()) {
         return NextResponse.json({ error: "Full name is required" }, { status: 400 });
       }
+      const normalizedFullName = input.fullName.trim().replace(/\s+/g, " ");
+
+      // Self-registration has no admin vetting it, so the one thing worth
+      // guarding against here is the same person accidentally (or
+      // opportunistically) registering twice under two different reference
+      // numbers - e.g. a typo'd reference number on the first attempt, then
+      // a "fresh start" on the second. A name that already exists in this
+      // department+session under a DIFFERENT reference number is a strong
+      // enough signal to stop and ask them to sort it out, rather than
+      // silently creating a second billable record for the same student.
+      const possibleDuplicate = await prisma.student.findFirst({
+        where: {
+          departmentId: department.id,
+          academicSessionId: department.academicSessionId,
+          fullName: { equals: normalizedFullName, mode: "insensitive" },
+          referenceNumber: { not: input.referenceNumber },
+        },
+        select: { id: true },
+      });
+      if (possibleDuplicate) {
+        return NextResponse.json(
+          {
+            error:
+              "A student with this name is already registered under a different reference number in this department. If that's you, use that reference number instead - otherwise, contact the department to sort it out.",
+          },
+          { status: 409 }
+        );
+      }
 
       try {
         student = await prisma.student.create({
@@ -96,10 +124,11 @@ export async function POST(req: NextRequest) {
             departmentId: department.id,
             academicSessionId: department.academicSessionId,
             referenceNumber: input.referenceNumber,
-            fullName: input.fullName!.trim(),
+            fullName: normalizedFullName,
             level: "L100",
             phone: input.phone,
             email: input.email || null,
+            registrationSource: "SELF",
           },
         });
       } catch (createErr) {

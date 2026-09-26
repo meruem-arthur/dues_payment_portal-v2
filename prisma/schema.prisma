@@ -64,6 +64,16 @@ enum StudentLevel {
   L400
 }
 
+// Distinguishes a student record an admin created (manual add or CSV
+// import) from one that was self-registered by a fresher on the public
+// payment form (see /api/payments/initiate). Lets financial secretaries
+// spot-check the unverified intake instead of it being indistinguishable
+// from admin-vetted data.
+enum StudentRegistrationSource {
+  ADMIN
+  SELF
+}
+
 enum PaymentStatus {
   PENDING
   SUCCESS
@@ -231,6 +241,10 @@ model Student {
   academicSession   AcademicSession @relation(fields: [academicSessionId], references: [id])
 
   paymentStatus PaymentStatus @default(PENDING)
+
+  // ADMIN for every existing row (manual add, CSV import) - only the public
+  // self-registration path in /api/payments/initiate ever sets SELF.
+  registrationSource StudentRegistrationSource @default(ADMIN)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

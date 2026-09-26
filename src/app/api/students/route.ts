@@ -13,6 +13,7 @@ export async function GET(req: NextRequest) {
     const departmentIdParam = searchParams.get("departmentId");
     const level = searchParams.get("level");
     const paymentStatus = searchParams.get("paymentStatus");
+    const registrationSource = searchParams.get("registrationSource");
     const search = searchParams.get("search");
 
     // scopedDepartmentWhere ignores departmentIdParam entirely for DEPARTMENT_ADMIN,
@@ -22,6 +23,7 @@ export async function GET(req: NextRequest) {
       ...scopedDepartmentWhere(user, departmentIdParam),
       ...(level ? { level } : {}),
       ...(paymentStatus ? { paymentStatus } : {}),
+      ...(registrationSource ? { registrationSource } : {}),
       ...(search
         ? {
             OR: [

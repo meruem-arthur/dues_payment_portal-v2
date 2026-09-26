@@ -14,6 +14,7 @@ type Student = {
   email: string | null;
   paymentStatus: string;
   hasPendingPayment: boolean;
+  registrationSource: "ADMIN" | "SELF";
 };
 
 const emptyForm = {
@@ -37,6 +38,7 @@ export function StudentManager({
   const [search, setSearch] = useState("");
   const [levelFilter, setLevelFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [addForm, setAddForm] = useState(emptyForm);
@@ -63,11 +65,12 @@ export function StudentManager({
     if (search) params.set("search", search);
     if (levelFilter) params.set("level", levelFilter);
     if (statusFilter) params.set("paymentStatus", statusFilter);
+    if (sourceFilter) params.set("registrationSource", sourceFilter);
     const res = await fetch(`/api/students?${params.toString()}`);
     const data = await res.json();
     setStudents(data.students ?? []);
     setLoading(false);
-  }, [departmentId, search, levelFilter, statusFilter]);
+  }, [departmentId, search, levelFilter, statusFilter, sourceFilter]);
 
   useEffect(() => {
     fetchStudents();
@@ -244,6 +247,11 @@ export function StudentManager({
           <option value="SUCCESS">Paid</option>
           <option value="PENDING">Unpaid / Pending</option>
         </select>
+        <select className="admin-input max-w-[170px]" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+          <option value="">All Sources</option>
+          <option value="SELF">Self-registered</option>
+          <option value="ADMIN">Added by admin</option>
+        </select>
         <div className="ml-auto flex items-center gap-2">
           <button
             className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-muted shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md transition-colors hover:bg-white/10 hover:text-admin-text disabled:opacity-60"
@@ -279,15 +287,16 @@ export function StudentManager({
               <th className="p-3">Level</th>
               <th className="p-3">Phone</th>
               <th className="p-3">Status</th>
+              <th className="p-3">Source</th>
               <th className="p-3"></th>
             </tr>
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={6} className="p-4 text-center text-muted">Loading...</td></tr>
+              <tr><td colSpan={7} className="p-4 text-center text-muted">Loading...</td></tr>
             )}
             {!loading && students.length === 0 && (
-              <tr><td colSpan={6} className="p-4 text-center text-muted">No students found.</td></tr>
+              <tr><td colSpan={7} className="p-4 text-center text-muted">No students found.</td></tr>
             )}
             {students.map((s) => (
               <tr key={s.id} className="border-b border-border/50">
@@ -312,6 +321,18 @@ export function StudentManager({
                   )}
                   {resendResult?.id === s.id && (
                     <p className="mt-1 text-xs text-muted">{resendResult.text}</p>
+                  )}
+                </td>
+                <td className="p-3">
+                  {s.registrationSource === "SELF" ? (
+                    <span
+                      className="rounded-full bg-amber-400/10 px-2 py-0.5 text-xs font-medium text-amber-400"
+                      title="Registered directly by the student on the public payment form - not vetted by an admin"
+                    >
+                      Self-registered
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted">Admin</span>
                   )}
                 </td>
                 <td className="space-x-2 p-3 text-right">
