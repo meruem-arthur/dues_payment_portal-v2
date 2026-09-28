@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
-import { issueReceiptAndNotify } from "@/lib/receipts";
+import { confirmSuccessfulPayment } from "@/lib/payments/confirm-payment";
 import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
 
 /**
- * Webhook is the ONLY authoritative source that marks a payment SUCCESS.
- * The student's browser redirect after payment is purely a UX convenience
- * and must never itself mark anything paid.
+ * The webhook is the normal way a payment becomes SUCCESS. The student's
+ * browser redirect after payment is a UX convenience and never marks anything
+ * paid on its own - if the webhook doesn't arrive, the reconcile job
+ * (src/lib/payments/reconcile.ts) asks Paystack directly, server-to-server,
+ * and confirms through the same confirmSuccessfulPayment() used here.
  *
  * Flow:
  * 1. Read raw body (needed for signature verification - do not re-serialize).
@@ -17,7 +19,7 @@ import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
  * 4. Look up the pending Payment by internalReference.
  * 5. Idempotency: insert a WebhookEvent row with a unique (provider, providerEventId)
  *    constraint. If it already exists, acknowledge 200 and do nothing further.
- * 6. Mark payment SUCCESS, issue receipt, send SMS.
+ * 6. Mark payment SUCCESS and issue the receipt; SMS/email go out in the background.
  */
 export async function POST(req: NextRequest) {
   const rawBody = await req.text();
@@ -110,16 +112,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ received: true, verificationFailed: true });
   }
 
-  await prisma.payment.update({
-    where: { id: pendingPayment.id },
-    data: {
-      status: "SUCCESS",
-      providerTxId: verified.providerTxId,
-      paidAt: verified.paidAt ?? new Date(),
-    },
+  // Marks the payment SUCCESS, issues the receipt, and queues the SMS/email
+  // to run AFTER this response is sent - so we acknowledge the provider in
+  // milliseconds instead of holding its request open while Arkesel/Brevo
+  // respond (a slow reply makes providers retry the webhook).
+  await confirmSuccessfulPayment(pendingPayment.id, {
+    providerTxId: verified.providerTxId,
+    paidAt: verified.paidAt,
   });
-
-  await issueReceiptAndNotify(pendingPayment.id);
 
   await prisma.webhookEvent.updateMany({
     where: { provider: department.paymentConfig.provider, providerEventId: parsed.providerEventId },

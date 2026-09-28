@@ -20,8 +20,70 @@ export async function generateReceiptNumber(): Promise<string> {
 }
 
 /**
- * Called ONLY after a payment has been confirmed via verified webhook.
- * Creates the receipt, marks the student PAID, and fires notifications.
+ * Creates the receipt for a SUCCESS payment and marks the student PAID.
+ * Database work only - no network calls - so it is fast enough to run
+ * inside the webhook request. Sending SMS/email is a separate step
+ * (sendReceiptNotifications) that callers run in the background.
+ *
+ * Safe to call more than once and from several places at once (the
+ * webhook, the status-page verify, the admin "Check payment" button and
+ * the cron job can all confirm the same payment): exactly one caller
+ * creates the receipt (`created: true`), everyone else gets the existing
+ * one back (`created: false`). Only the creator should send notifications,
+ * which is what stops a racing webhook + reconcile from texting a student
+ * twice.
+ */
+export async function issueReceipt(paymentId: string) {
+  const payment = await prisma.payment.findUniqueOrThrow({ where: { id: paymentId } });
+
+  if (payment.status !== "SUCCESS") {
+    throw new Error("Cannot issue a receipt for a payment that is not SUCCESS");
+  }
+
+  // Idempotency: a receipt may already exist for this payment.
+  const existing = await prisma.receipt.findUnique({ where: { paymentId } });
+  if (existing) return { receipt: existing, created: false };
+
+  // Receipt numbers come from a count, so two concurrent issuers (for this
+  // or a different payment) can pick the same number and one insert hits a
+  // unique-constraint error (P2002). If the loser's payment now has a
+  // receipt, another caller won the race - return theirs. Otherwise the
+  // number itself collided, so regenerate and try again.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const receiptNumber = await generateReceiptNumber();
+    try {
+      const receipt = await prisma.$transaction(async (tx) => {
+        const r = await tx.receipt.create({
+          data: {
+            receiptNumber,
+            paymentId: payment.id,
+            studentId: payment.studentId,
+            departmentId: payment.departmentId,
+          },
+        });
+        await tx.student.update({
+          where: { id: payment.studentId },
+          data: { paymentStatus: "SUCCESS" as any },
+        });
+        return r;
+      });
+      return { receipt, created: true };
+    } catch (err: any) {
+      if (err?.code !== "P2002") throw err;
+      const winner = await prisma.receipt.findUnique({ where: { paymentId } });
+      if (winner) return { receipt: winner, created: false };
+    }
+  }
+
+  throw new Error("Could not allocate a unique receipt number after several attempts");
+}
+
+/**
+ * Issues the receipt (if needed) and sends the notifications right here,
+ * waiting for them. Kept for callers that want the old all-in-one
+ * behaviour; the payment confirmation paths use issueReceipt() +
+ * sendReceiptNotifications() in the background instead
+ * (see src/lib/payments/confirm-payment.ts).
  * Notification failure (SMS/email) must never roll back the payment/receipt.
  */
 export async function issueReceiptAndNotify(paymentId: string) {
@@ -38,32 +100,15 @@ export async function issueReceiptAndNotify(paymentId: string) {
     throw new Error("Cannot issue a receipt for a payment that is not SUCCESS");
   }
 
-  // Idempotency: a receipt may already exist for this payment.
-  const existing = await prisma.receipt.findUnique({ where: { paymentId } });
-  if (existing) return existing;
-
-  const receiptNumber = await generateReceiptNumber();
-
-  const receipt = await prisma.$transaction(async (tx) => {
-    const r = await tx.receipt.create({
-      data: {
-        receiptNumber,
-        paymentId: payment.id,
-        studentId: payment.studentId,
-        departmentId: payment.departmentId,
-      },
-    });
-    await tx.student.update({
-      where: { id: payment.studentId },
-      data: { paymentStatus: "SUCCESS" as any },
-    });
-    return r;
-  });
+  const { receipt, created } = await issueReceipt(paymentId);
+  if (!created) return receipt;
 
   // Notifications happen outside the DB transaction and are best-effort -
   // one channel failing must never affect the other or the payment/receipt.
-  await sendSmsReceipt(payment, receiptNumber).catch((e) => captureError(e, { context: "sms-receipt", paymentId: payment.id }));
-  await sendEmailReceipt(payment, receiptNumber, receipt.issuedAt).catch((e) =>
+  await sendSmsReceipt(payment, receipt.receiptNumber).catch((e) =>
+    captureError(e, { context: "sms-receipt", paymentId: payment.id })
+  );
+  await sendEmailReceipt(payment, receipt.receiptNumber, receipt.issuedAt).catch((e) =>
     captureError(e, { context: "email-receipt", paymentId: payment.id })
   );
 
@@ -71,15 +116,17 @@ export async function issueReceiptAndNotify(paymentId: string) {
 }
 
 /**
- * Re-sends the SMS/email receipt for a payment that has ALREADY succeeded
- * and already has a receipt - it never creates a new receipt or re-verifies
- * anything with the payment provider. Always re-reads the student record
- * fresh, so if an admin has since corrected a typo'd phone/email, THIS send
- * goes to the corrected contact - unlike the original webhook-triggered
- * send, which only ever fired once against whatever was on file at the
- * moment the payment was confirmed.
+ * Sends the SMS and email receipt for a payment that already succeeded and
+ * already has a receipt. Never creates a receipt and never talks to the
+ * payment provider. Re-reads the student fresh, so a phone/email an admin
+ * has corrected since is what gets used. Each channel is independent: one
+ * failing never blocks the other, and neither can change payment or
+ * receipt state.
+ *
+ * This is what runs in the background after a payment is confirmed, and
+ * what the admin "Resend Receipt" button calls.
  */
-export async function resendReceipt(paymentId: string) {
+export async function sendReceiptNotifications(paymentId: string) {
   const payment = await prisma.payment.findUniqueOrThrow({
     where: { id: paymentId },
     include: {
@@ -91,7 +138,7 @@ export async function resendReceipt(paymentId: string) {
   });
 
   if (payment.status !== "SUCCESS" || !payment.receipt) {
-    throw new Error("Cannot resend a receipt for a payment that hasn't succeeded yet");
+    throw new Error("Cannot send a receipt for a payment that hasn't succeeded yet");
   }
 
   const results: { sms: "SENT" | "FAILED" | "SKIPPED"; email: "SENT" | "FAILED" | "SKIPPED" } = {
@@ -103,17 +150,26 @@ export async function resendReceipt(paymentId: string) {
     results.sms = (await sendSmsReceipt(payment, payment.receipt.receiptNumber)) ?? "SKIPPED";
   } catch (e) {
     results.sms = "FAILED";
-    captureError(e, { context: "sms-receipt-resend", paymentId: payment.id });
+    captureError(e, { context: "sms-receipt", paymentId: payment.id });
   }
 
   try {
     results.email = (await sendEmailReceipt(payment, payment.receipt.receiptNumber, payment.receipt.issuedAt)) ?? "SKIPPED";
   } catch (e) {
     results.email = "FAILED";
-    captureError(e, { context: "email-receipt-resend", paymentId: payment.id });
+    captureError(e, { context: "email-receipt", paymentId: payment.id });
   }
 
   return results;
+}
+
+/**
+ * Manual re-send from the admin UI (the original send only ever fires once,
+ * against whatever contact details were on file at that moment - so after
+ * fixing a typo'd phone/email an admin needs a way to send it again).
+ */
+export async function resendReceipt(paymentId: string) {
+  return sendReceiptNotifications(paymentId);
 }
 
 async function sendSmsReceipt(

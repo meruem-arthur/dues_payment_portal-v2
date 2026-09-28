@@ -12,18 +12,21 @@ vi.mock("@/lib/payments/provider-factory", () => ({
   getPaymentProvider: vi.fn(),
 }));
 
-vi.mock("@/lib/receipts", () => ({
-  issueReceiptAndNotify: vi.fn(),
+// The SUCCESS transition (status flip, receipt, background SMS/email) lives in
+// confirmSuccessfulPayment and is covered by confirm-payment.test.ts - here we
+// only assert the webhook hands over to it correctly.
+vi.mock("@/lib/payments/confirm-payment", () => ({
+  confirmSuccessfulPayment: vi.fn(),
 }));
 
 import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
-import { issueReceiptAndNotify } from "@/lib/receipts";
+import { confirmSuccessfulPayment } from "@/lib/payments/confirm-payment";
 import { POST } from "./route";
 
 const mockedPrisma = vi.mocked(prisma, true);
 const mockedGetPaymentProvider = vi.mocked(getPaymentProvider);
-const mockedIssueReceipt = vi.mocked(issueReceiptAndNotify);
+const mockedConfirm = vi.mocked(confirmSuccessfulPayment);
 
 const paymentConfig = {
   provider: "PAYSTACK",
@@ -66,7 +69,7 @@ beforeEach(() => {
   mockedPrisma.webhookEvent.create.mockResolvedValue({ id: "evt_1" } as any);
   mockedPrisma.webhookEvent.updateMany.mockResolvedValue({ count: 1 } as any);
   mockedPrisma.payment.update.mockResolvedValue({} as any);
-  mockedIssueReceipt.mockResolvedValue({} as any);
+  mockedConfirm.mockResolvedValue({ newlyConfirmed: true, receiptNumber: "REC-2026-000001", receiptCreated: true });
 
   providerMock = {
     verifyWebhookSignature: vi.fn().mockReturnValue(true),
@@ -94,17 +97,22 @@ beforeEach(() => {
 });
 
 describe("POST /api/webhooks/paystack", () => {
-  it("marks the payment SUCCESS and issues a receipt on a valid, verified event", async () => {
+  it("confirms the payment (status + receipt + background notifications) on a valid, verified event", async () => {
     const res = await POST(makeRequest(rawPayload));
     const data = await res.json();
 
     expect(res.status).toBe(200);
     expect(data.received).toBe(true);
-    expect(mockedPrisma.payment.update).toHaveBeenCalledWith({
-      where: { id: "payment_1" },
-      data: expect.objectContaining({ status: "SUCCESS", providerTxId: "tx_1" }),
+    expect(mockedConfirm).toHaveBeenCalledWith("payment_1", {
+      providerTxId: "tx_1",
+      paidAt: new Date("2026-01-01T00:00:00Z"),
     });
-    expect(mockedIssueReceipt).toHaveBeenCalledWith("payment_1");
+    // The webhook itself must not flip the status any more - that is
+    // confirmSuccessfulPayment's job, so it stays race-safe.
+    expect(mockedPrisma.payment.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.webhookEvent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { processed: true } })
+    );
   });
 
   it("rejects requests with an invalid JSON body", async () => {
@@ -137,7 +145,7 @@ describe("POST /api/webhooks/paystack", () => {
     expect(res.status).toBe(401);
     expect(data.error).toMatch(/invalid webhook signature/i);
     expect(mockedPrisma.payment.update).not.toHaveBeenCalled();
-    expect(mockedIssueReceipt).not.toHaveBeenCalled();
+    expect(mockedConfirm).not.toHaveBeenCalled();
   });
 
   it("acknowledges a duplicate event without reprocessing it", async () => {
@@ -151,7 +159,7 @@ describe("POST /api/webhooks/paystack", () => {
     expect(res.status).toBe(200);
     expect(data.duplicate).toBe(true);
     expect(mockedPrisma.payment.update).not.toHaveBeenCalled();
-    expect(mockedIssueReceipt).not.toHaveBeenCalled();
+    expect(mockedConfirm).not.toHaveBeenCalled();
   });
 
   it("marks the payment FAILED when the provider reports a failed transaction", async () => {
@@ -173,7 +181,7 @@ describe("POST /api/webhooks/paystack", () => {
       where: { id: "payment_1" },
       data: { status: "FAILED" },
     });
-    expect(mockedIssueReceipt).not.toHaveBeenCalled();
+    expect(mockedConfirm).not.toHaveBeenCalled();
   });
 
   it("marks the payment FAILED when server-side verification with the provider fails", async () => {
@@ -196,7 +204,7 @@ describe("POST /api/webhooks/paystack", () => {
       where: { id: "payment_1" },
       data: { status: "FAILED" },
     });
-    expect(mockedIssueReceipt).not.toHaveBeenCalled();
+    expect(mockedConfirm).not.toHaveBeenCalled();
   });
 
   it("marks the payment FAILED when the verified reference doesn't match the pending payment", async () => {
@@ -214,6 +222,6 @@ describe("POST /api/webhooks/paystack", () => {
     const data = await res.json();
 
     expect(data.verificationFailed).toBe(true);
-    expect(mockedIssueReceipt).not.toHaveBeenCalled();
+    expect(mockedConfirm).not.toHaveBeenCalled();
   });
 });

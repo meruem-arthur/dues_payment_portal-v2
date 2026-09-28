@@ -21,7 +21,7 @@ vi.mock("@/lib/email/provider-factory", () => ({
 import { prisma } from "@/lib/db";
 import { getSmsProvider } from "@/lib/sms/provider-factory";
 import { getEmailProvider } from "@/lib/email/provider-factory";
-import { issueReceiptAndNotify } from "@/lib/receipts";
+import { issueReceiptAndNotify, issueReceipt, sendReceiptNotifications } from "@/lib/receipts";
 
 const mockedPrisma = vi.mocked(prisma, true);
 const mockedGetSmsProvider = vi.mocked(getSmsProvider);
@@ -209,5 +209,102 @@ describe("issueReceiptAndNotify", () => {
     expect(mockedPrisma.notificationLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ channel: "EMAIL", recipient: "kwame@example.com", status: "SENT" }),
     });
+  });
+});
+
+describe("issueReceipt", () => {
+  it("throws if the payment is not SUCCESS, without touching the database", async () => {
+    mockedPrisma.payment.findUniqueOrThrow.mockResolvedValue({ ...successPaymentAmount100, status: "PENDING" } as any);
+
+    await expect(issueReceipt("payment_1")).rejects.toThrow(/not SUCCESS/i);
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("creates the receipt, marks the student paid, and reports created: true - without sending anything", async () => {
+    const result = await issueReceipt("payment_1");
+
+    expect(result.created).toBe(true);
+    expect(result.receipt.receiptNumber).toBe("REC-2026-000006");
+    expect(txMock.student.update).toHaveBeenCalledWith({
+      where: { id: "student_1" },
+      data: { paymentStatus: "SUCCESS" },
+    });
+    // Sending is a separate, background step - issuing must stay database-only.
+    expect(smsSend).not.toHaveBeenCalled();
+    expect(emailSend).not.toHaveBeenCalled();
+  });
+
+  it("returns the existing receipt with created: false when one already exists", async () => {
+    const existing = { id: "receipt_existing", receiptNumber: "REC-2026-000003" };
+    mockedPrisma.receipt.findUnique.mockResolvedValue(existing as any);
+
+    const result = await issueReceipt("payment_1");
+
+    expect(result).toEqual({ receipt: existing, created: false });
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("when it loses a race for the SAME payment, returns the winner's receipt as created: false", async () => {
+    const winner = { id: "receipt_winner", receiptNumber: "REC-2026-000006" };
+    // First lookup (before creating): nothing yet. After the insert fails: the winner is there.
+    mockedPrisma.receipt.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(winner as any);
+    mockedPrisma.$transaction.mockRejectedValueOnce(Object.assign(new Error("Unique constraint"), { code: "P2002" }));
+
+    const result = await issueReceipt("payment_1");
+
+    expect(result).toEqual({ receipt: winner, created: false });
+  });
+
+  it("when only the receipt NUMBER collided (different payment won it), regenerates and retries", async () => {
+    // Nobody has a receipt for THIS payment, so after the first insert collides we try again.
+    mockedPrisma.receipt.findUnique.mockResolvedValue(null);
+    mockedPrisma.receipt.count.mockResolvedValueOnce(5).mockResolvedValueOnce(6);
+    mockedPrisma.$transaction
+      .mockRejectedValueOnce(Object.assign(new Error("Unique constraint"), { code: "P2002" }))
+      .mockImplementationOnce(async (cb: any) => cb(txMock));
+    txMock.receipt.create.mockResolvedValue({ id: "receipt_2", receiptNumber: "REC-2026-000007", issuedAt: new Date() });
+
+    const result = await issueReceipt("payment_1");
+
+    expect(result.created).toBe(true);
+    expect(mockedPrisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(mockedPrisma.receipt.count).toHaveBeenCalledTimes(2);
+  });
+
+  it("rethrows errors that are not unique-constraint collisions", async () => {
+    mockedPrisma.$transaction.mockRejectedValueOnce(new Error("connection lost"));
+
+    await expect(issueReceipt("payment_1")).rejects.toThrow("connection lost");
+  });
+});
+
+describe("sendReceiptNotifications", () => {
+  const withReceipt = {
+    ...successPaymentAmount100,
+    receipt: { receiptNumber: "REC-2026-000006", issuedAt: new Date("2026-09-13T09:00:00Z") },
+  };
+
+  it("sends SMS and email for an existing receipt without creating one", async () => {
+    mockedPrisma.payment.findUniqueOrThrow.mockResolvedValue(withReceipt as any);
+
+    const results = await sendReceiptNotifications("payment_1");
+
+    expect(results).toEqual({ sms: "SENT", email: "SENT" });
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+    expect(smsSend.mock.calls[0][0].message).toContain("REC-2026-000006");
+  });
+
+  it("throws when there is no receipt yet", async () => {
+    await expect(sendReceiptNotifications("payment_1")).rejects.toThrow(/hasn't succeeded|receipt/i);
+  });
+
+  it("an SMS failure does not stop the email", async () => {
+    mockedPrisma.payment.findUniqueOrThrow.mockResolvedValue(withReceipt as any);
+    smsSend.mockRejectedValue(new Error("SMS gateway down"));
+
+    const results = await sendReceiptNotifications("payment_1");
+
+    expect(results.sms).toBe("FAILED");
+    expect(results.email).toBe("SENT");
   });
 });

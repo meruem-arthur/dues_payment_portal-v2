@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
-import { issueReceiptAndNotify } from "@/lib/receipts";
+import { confirmSuccessfulPayment } from "@/lib/payments/confirm-payment";
 import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
 
 /**
@@ -96,16 +96,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ received: true, verificationFailed: true });
   }
 
-  await prisma.payment.update({
-    where: { id: pendingPayment.id },
-    data: {
-      status: "SUCCESS",
-      providerTxId: verified.providerTxId,
-      paidAt: verified.paidAt ?? new Date(),
-    },
+  // Marks the payment SUCCESS, issues the receipt, and queues the SMS/email
+  // to run AFTER this response is sent - so we acknowledge the provider in
+  // milliseconds instead of holding its request open while Arkesel/Brevo
+  // respond (a slow reply makes providers retry the webhook).
+  await confirmSuccessfulPayment(pendingPayment.id, {
+    providerTxId: verified.providerTxId,
+    paidAt: verified.paidAt,
   });
-
-  await issueReceiptAndNotify(pendingPayment.id);
 
   await prisma.webhookEvent.updateMany({
     where: { provider: "HUBTEL", providerEventId: parsed.providerEventId },
