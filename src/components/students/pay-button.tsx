@@ -37,6 +37,14 @@ export function PayButton({
     e.preventDefault();
     setError(null);
 
+    // Trim once, here, and write the trimmed value back into state so the
+    // confirm screen and the eventual /api/payments/initiate call both use
+    // the same, clean value - a copy-pasted space is invisible on screen but
+    // breaks an exact-match DB lookup. (The server also trims, but fixing it
+    // here means the confirm step never echoes back a stray space either.)
+    const cleanReferenceNumber = referenceNumber.trim();
+    setReferenceNumber(cleanReferenceNumber);
+
     if (isFresher) {
       setStep("confirm");
       return;
@@ -49,7 +57,7 @@ export function PayButton({
       const res = await fetch("/api/students/lookup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ departmentSlug, paymentType, referenceNumber }),
+        body: JSON.stringify({ departmentSlug, paymentType, referenceNumber: cleanReferenceNumber }),
       });
       const data = await res.json();
       if (!res.ok) {
