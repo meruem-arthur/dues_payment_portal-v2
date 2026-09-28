@@ -89,8 +89,17 @@ export class PaystackProvider implements PaymentProvider {
     const data = await res.json();
     const tx = data.data;
 
+    // Paystack transaction statuses: success | failed | reversed (terminal),
+    // and abandoned | ongoing | pending | processing | queued (not finished
+    // - "abandoned" in particular just means the customer hasn't completed
+    // checkout YET and can still return to it, so it is deliberately NOT
+    // treated as a failure).
+    const state: "SUCCESS" | "FAILED" | "PENDING" =
+      tx.status === "success" ? "SUCCESS" : tx.status === "failed" || tx.status === "reversed" ? "FAILED" : "PENDING";
+
     return {
-      success: tx.status === "success",
+      success: state === "SUCCESS",
+      state,
       providerTxId: String(tx.id),
       internalReference: tx.reference,
       amount: tx.amount / 100,

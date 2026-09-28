@@ -30,6 +30,12 @@ export type InitiatePaymentResult = {
 
 export type VerifiedTransaction = {
   success: boolean;
+  // Finer-grained than `success`, for callers that need to tell "definitely
+  // failed" apart from "not finished yet" (the reconcile job must never mark
+  // a still-in-progress payment as failed). Optional so existing adapters,
+  // webhook payload parsing and test mocks that only know `success` keep
+  // working - a missing value means "not success, outcome unknown".
+  state?: "SUCCESS" | "FAILED" | "PENDING";
   providerTxId: string;
   internalReference: string; // parsed back out of metadata
   amount: number;

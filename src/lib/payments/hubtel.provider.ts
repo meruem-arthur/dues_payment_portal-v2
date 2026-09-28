@@ -124,8 +124,15 @@ export class HubtelProvider implements PaymentProvider {
     const tx = data.data ?? data.Data;
     const status = String(tx?.status ?? tx?.Status ?? "").toLowerCase();
 
+    // Only an explicit "failed" counts as a definite failure - Hubtel's
+    // in-progress vocabulary isn't documented well enough to enumerate, so
+    // anything else that isn't success is treated as "not finished yet".
+    const state: "SUCCESS" | "FAILED" | "PENDING" =
+      status === "completed" || status === "success" ? "SUCCESS" : status === "failed" ? "FAILED" : "PENDING";
+
     return {
-      success: status === "completed" || status === "success",
+      success: state === "SUCCESS",
+      state,
       providerTxId: String(tx?.transactionId ?? tx?.TransactionId ?? identifiers.providerTxId),
       internalReference: tx?.clientReference ?? tx?.ClientReference ?? "",
       amount: Number(tx?.amount ?? tx?.Amount ?? 0),

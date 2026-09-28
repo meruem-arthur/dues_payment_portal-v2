@@ -174,6 +174,9 @@ export function StudentManager({
   const [resendingId, setResendingId] = useState<string | null>(null);
   const [resendResult, setResendResult] = useState<{ id: string; text: string } | null>(null);
 
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+  const [checkResult, setCheckResult] = useState<{ id: string; text: string; tone: "ok" | "warn" | "error" } | null>(null);
+
   async function resendStudentReceipt(student: Student) {
     if (
       !confirm(
@@ -197,6 +200,49 @@ export function StudentManager({
       setResendResult({ id: student.id, text: parts.length ? parts.join(", ") : "Nothing to resend (SMS/email disabled or no email on file)" });
     } finally {
       setResendingId(null);
+    }
+  }
+
+  // Asks the payment provider what actually happened to this student's
+  // pending payment - the check to run BEFORE cancelling one. If the provider
+  // says it went through, the payment is confirmed and the receipt issued,
+  // just as if the webhook had arrived.
+  async function checkPayment(student: Student) {
+    setCheckingId(student.id);
+    setCheckResult(null);
+    try {
+      const res = await fetch(`/api/students/${student.id}/verify-payment`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setCheckResult({ id: student.id, text: data.error ?? "Could not check the payment", tone: "error" });
+        return;
+      }
+      switch (data.outcome) {
+        case "CONFIRMED":
+          setCheckResult({ id: student.id, text: `Payment confirmed - receipt ${data.receiptNumber} issued`, tone: "ok" });
+          break;
+        case "ALREADY_CONFIRMED":
+          setCheckResult({ id: student.id, text: "Already confirmed", tone: "ok" });
+          break;
+        case "STILL_PENDING":
+          setCheckResult({
+            id: student.id,
+            text: "The provider says this payment isn't finished yet. Check again in a few minutes.",
+            tone: "warn",
+          });
+          break;
+        case "FAILED":
+          setCheckResult({ id: student.id, text: "The provider reports this payment failed. It's safe to cancel it.", tone: "warn" });
+          break;
+        case "SKIPPED":
+          setCheckResult({ id: student.id, text: data.reason ?? "Can't be checked automatically", tone: "warn" });
+          break;
+        default:
+          setCheckResult({ id: student.id, text: data.message ?? "Could not reach the payment provider", tone: "error" });
+      }
+      fetchStudents();
+    } finally {
+      setCheckingId(null);
     }
   }
 
@@ -355,6 +401,15 @@ export function StudentManager({
                   {resendResult?.id === s.id && (
                     <p className="mt-1 text-xs text-muted">{resendResult.text}</p>
                   )}
+                  {checkResult?.id === s.id && (
+                    <p
+                      className={`mt-1 text-xs ${
+                        checkResult.tone === "ok" ? "text-accent" : checkResult.tone === "warn" ? "text-amber-400" : "text-red-400"
+                      }`}
+                    >
+                      {checkResult.text}
+                    </p>
+                  )}
                 </td>
                 <td className="p-3">
                   {s.registrationSource === "SELF" ? (
@@ -369,6 +424,15 @@ export function StudentManager({
                   )}
                 </td>
                 <td className="space-x-2 p-3 text-right">
+                  {s.paymentStatus !== "SUCCESS" && s.hasPendingPayment && (
+                    <button
+                      className="text-accent hover:underline disabled:opacity-50"
+                      onClick={() => checkPayment(s)}
+                      disabled={checkingId === s.id}
+                    >
+                      {checkingId === s.id ? "Checking..." : "Check Payment"}
+                    </button>
+                  )}
                   {s.paymentStatus !== "SUCCESS" && s.hasPendingPayment && (
                     <button
                       className="text-amber-400 hover:underline disabled:opacity-50"
