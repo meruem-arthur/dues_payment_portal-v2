@@ -27,12 +27,12 @@ const initiateSchema = z.object({
 });
 
 // This is the one fully public, unauthenticated endpoint in the app -
-// anyone can call it without logging in, so it's the one most exposed to a
-// script hammering reference numbers or repeatedly calling out to the
-// payment provider's API on our dime. 8 requests / 10 minutes per IP is
-// generous enough for a genuine student retrying a typo or a slow network,
-// while still shutting down scripted abuse.
-const RATE_LIMIT_MAX_REQUESTS = 8;
+// anyone can call it without logging in. Keyed by IP (see checkRateLimit),
+// so this is a per-IP bucket, not per-student - a lot of students will be
+// sharing one IP on launch day (campus WiFi, carrier-grade NAT on mobile
+// data), so the limit needs real headroom for a legitimate burst of many
+// different students paying at once, not just one person retrying a typo.
+const RATE_LIMIT_MAX_REQUESTS = 100;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
 // Public endpoint - no session required. Students are matched by reference

@@ -305,8 +305,10 @@ describe("POST /api/payments/initiate", () => {
 
   it("rate-limits repeated requests from the same IP", async () => {
     const ip = "10.0.0.99";
-    // 8 requests are allowed (RATE_LIMIT_MAX_REQUESTS in route.ts).
-    for (let i = 0; i < 8; i++) {
+    // 100 requests are allowed (RATE_LIMIT_MAX_REQUESTS in route.ts) before
+    // the 101st is blocked - deliberately generous since this is a per-IP
+    // bucket and many students can share one IP (campus WiFi, carrier NAT).
+    for (let i = 0; i < 100; i++) {
       const res = await POST(makeRequest(validBody, ip));
       expect(res.status).toBe(200);
     }
@@ -317,7 +319,7 @@ describe("POST /api/payments/initiate", () => {
   });
 
   it("does not rate-limit across different IPs", async () => {
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 100; i++) {
       await POST(makeRequest(validBody, "10.0.0.50"));
     }
     const res = await POST(makeRequest(validBody, "10.0.0.51"));

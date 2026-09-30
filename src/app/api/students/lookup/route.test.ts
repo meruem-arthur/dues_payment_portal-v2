@@ -108,8 +108,11 @@ describe("POST /api/students/lookup", () => {
   });
 
   it("rate-limits repeated requests from the same IP", async () => {
+    // 100 requests are allowed (RATE_LIMIT_MAX_REQUESTS in route.ts) before
+    // the 101st is blocked - deliberately generous since this is a per-IP
+    // bucket and many students can share one IP (campus WiFi, carrier NAT).
     const ip = "10.0.0.99";
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 100; i++) {
       const res = await POST(makeRequest(validBody, ip));
       expect(res.status).toBe(200);
     }

@@ -23,8 +23,12 @@ const lookupSchema = z.object({
 // modifies, or charges anything.
 //
 // Rate-limited the same as initiate, since it's the same kind of
-// reference-number-guessing surface.
-const RATE_LIMIT_MAX_REQUESTS = 8;
+// reference-number-guessing surface. Keyed by IP (see checkRateLimit), so
+// this is a per-IP bucket, not per-student - on launch day a lot of
+// students will be sharing one IP (campus WiFi, carrier-grade NAT on
+// mobile data), so the limit needs real headroom for a legitimate burst of
+// many different students, not just one person retrying.
+const RATE_LIMIT_MAX_REQUESTS = 100;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
 export async function POST(req: NextRequest) {
