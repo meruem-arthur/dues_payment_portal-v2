@@ -98,6 +98,18 @@ endpoint — the department is resolved from the transaction reference):
 https://your-domain.com/api/webhooks/paystack
 ```
 
+## Dues Cleared (exempt) students
+
+A **super admin** can mark a continuing student (Level 200-400) as *Dues Cleared*, e.g. a scholarship holder, with a required reason. Department admins and financial secretaries cannot; every control below is enforced server-side (403), not just hidden in the UI.
+
+- **Student side:** the student still types their details and reviews them. The review screen says "Dues Cleared" and offers "View & Download Receipt (PDF)" instead of "Confirm & Pay". No payment or provider call happens, and `/api/payments/initiate` hard-blocks cleared students. Publicly the wording is always "Dues Cleared": "exempt" and the reason appear only in admin screens.
+- **Receipt:** a clearance receipt (`CLR-<year>-000001`, its own series) is issued with no payment, amount or provider. It is emailed (PDF attached) only if the student has an email and the department's email setting is on; no SMS is sent. If it can't be sent, the super admin sees why and can still download the PDF from the student row.
+- **Public download:** `/api/students/lookup` returns a ~15-minute token signed with `AUTH_SECRET`, redeemed at `GET /api/receipts/clearance?token=...`. There is no permanent public URL keyed by receipt number.
+- **Rules:** refused for Level 100 students and for anyone with a successful or pending payment. Removing a clearance voids the receipt (kept, never deleted), so `/verify/[receiptNumber]` shows it as invalid. Every grant and removal is audited (`STUDENT_EXEMPTED`, `EXEMPTION_REMOVED`).
+- **Admin APIs (super admin only):** `POST`/`DELETE /api/students/[id]/exempt`, `GET /api/students/[id]/clearance-receipt`, and `POST /api/students/[id]/resend-receipt` (resends the clearance email for a cleared student).
+- **Dashboard:** exempt students are excluded from "Pending" and the expected total, but still count toward Total Students; a separate "Exempt" card shows the count (with a per-level breakdown). The students list supports an `exempt` filter.
+- **Deploying:** needs the `20260930120000_student_dues_cleared` migration (runs automatically via `npm run build`) and `AUTH_SECRET` set.
+
 ## Deployment
 
 - App: Vercel or Render.

@@ -15,7 +15,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
-import { CheckCircle2, Clock, Users, Wallet } from "lucide-react";
+import { BadgeCheck, CheckCircle2, Clock, Users, Wallet } from "lucide-react";
 
 type DepartmentOption = { id: string; name: string };
 
@@ -25,11 +25,12 @@ type Stats = {
     totalStudents: number;
     paidStudents: number;
     pendingStudents: number;
+    exemptStudents: number;
     totalCollected: number;
     expectedTotal: number;
   };
   paymentStatusCounts: Record<"SUCCESS" | "PENDING" | "FAILED" | "CANCELLED" | "REFUNDED", number>;
-  levelBreakdown: { level: string; total: number; paid: number; pending: number }[];
+  levelBreakdown: { level: string; total: number; paid: number; pending: number; exempt: number }[];
   trend: { date: string; amount: number }[];
   recentPayments: {
     id: string;
@@ -110,7 +111,7 @@ export function DepartmentFilterDashboard({ departments }: { departments: Depart
 
       {stats && (
         <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <StatCard
               icon={<Users size={18} />}
               label="Total Students"
@@ -130,6 +131,12 @@ export function DepartmentFilterDashboard({ departments }: { departments: Depart
               icon={<Clock size={18} />}
               label="Pending"
               value={stats.totals.pendingStudents.toLocaleString()}
+            />
+            <StatCard
+              icon={<BadgeCheck size={18} />}
+              label="Exempt"
+              value={stats.totals.exemptStudents.toLocaleString()}
+              sub="Dues cleared, not billed"
             />
             <StatCard
               icon={<Wallet size={18} />}
@@ -229,7 +236,8 @@ export function DepartmentFilterDashboard({ departments }: { departments: Depart
                   <YAxis tick={{ fill: "#9c93b3", fontSize: 11 }} axisLine={false} tickLine={false} width={30} />
                   <Tooltip contentStyle={{ background: "#15111f", border: "1px solid #2a2338", borderRadius: 8 }} />
                   <Bar dataKey="paid" stackId="a" fill="#a855f7" radius={[0, 0, 0, 0]} />
-                  <Bar dataKey="pending" stackId="a" fill="#2a2338" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="pending" stackId="a" fill="#2a2338" />
+                  <Bar dataKey="exempt" stackId="a" fill="#38bdf8" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

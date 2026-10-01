@@ -74,6 +74,14 @@ enum StudentRegistrationSource {
   SELF
 }
 
+// PAYMENT receipts prove a successful payment. CLEARANCE receipts are issued
+// to a student a super admin has marked "Dues Cleared" (see Student.isExempt)
+// - they have no payment behind them.
+enum ReceiptKind {
+  PAYMENT
+  CLEARANCE
+}
+
 enum PaymentStatus {
   PENDING
   SUCCESS
@@ -199,6 +207,7 @@ model User {
 
   auditLogs AuditLog[]
   passwordResetTokens PasswordResetToken[]
+  exemptedStudents Student[] @relation("StudentExemptedBy")
 
   @@index([departmentId])
   @@map("users")
@@ -246,6 +255,15 @@ model Student {
   // self-registration path in /api/payments/initiate ever sets SELF.
   registrationSource StudentRegistrationSource @default(ADMIN)
 
+  // "Dues Cleared": a super admin has excused this student from paying.
+  // Publicly this is always worded "Dues Cleared" - the word "exempt" and
+  // the reason are only ever shown in the admin screens. Never set for L100.
+  isExempt       Boolean   @default(false)
+  exemptReason   String?
+  exemptedAt     DateTime?
+  exemptedById   String?
+  exemptedBy     User?     @relation("StudentExemptedBy", fields: [exemptedById], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -257,6 +275,7 @@ model Student {
   @@unique([departmentId, academicSessionId, referenceNumber])
   @@index([departmentId, level])
   @@index([departmentId, paymentStatus])
+  @@index([departmentId, isExempt])
   @@map("students")
 }
 
@@ -302,16 +321,26 @@ model Payment {
 
 model Receipt {
   id             String   @id @default(cuid())
-  receiptNumber  String   @unique // e.g. REC-2026-000001
-  paymentId      String   @unique
-  payment        Payment  @relation(fields: [paymentId], references: [id])
+  receiptNumber  String   @unique // REC-2026-000001 (payment) or CLR-2026-000001 (clearance)
+  // Null for CLEARANCE receipts. Explicit Restrict keeps the FK behaviour
+  // it had when this was required (optional relations default to SetNull).
+  paymentId      String?  @unique
+  payment        Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  kind           ReceiptKind @default(PAYMENT)
   studentId      String
   student        Student  @relation(fields: [studentId], references: [id])
   departmentId   String
   department     Department @relation(fields: [departmentId], references: [id])
 
   issuedAt DateTime @default(now())
+  // Set when a clearance is removed. The receipt row is kept (so its number
+  // is never reused) but /verify and the download route treat it as invalid.
+  voidedAt DateTime?
 
+  // At most one receipt of each kind per student - in practice this is what
+  // guarantees a single clearance receipt (a student can only ever have one
+  // successful payment, so also one PAYMENT receipt).
+  @@unique([studentId, kind])
   @@map("receipts")
 }
 

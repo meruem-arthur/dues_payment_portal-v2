@@ -28,6 +28,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     const body = await req.json();
     const parsed = studentSchema.parse(body);
 
+    // A Dues Cleared student can never be Level 100 (fresher dues are never
+    // waived). Unmark the clearance first if the level genuinely changed.
+    if (existing.isExempt && parsed.level === "L100") {
+      return NextResponse.json(
+        { error: "A Dues Cleared student cannot be moved to Level 100. Remove the clearance first." },
+        { status: 400 }
+      );
+    }
+
     if (parsed.referenceNumber !== existing.referenceNumber) {
       const duplicate = await prisma.student.findUnique({
         where: {

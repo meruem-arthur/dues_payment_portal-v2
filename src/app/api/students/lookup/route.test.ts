@@ -22,6 +22,8 @@ const baseDepartment = {
 };
 
 const baseStudent = {
+  id: "student_1",
+  isExempt: false,
   fullName: "Kwame Mensah",
   level: "L300",
   paymentStatus: "PENDING",
@@ -47,6 +49,23 @@ beforeEach(() => {
 
   mockedPrisma.department.findUnique.mockResolvedValue(baseDepartment as any);
   mockedPrisma.student.findFirst.mockResolvedValue(baseStudent as any);
+});
+
+describe("POST /api/students/lookup - Dues Cleared students", () => {
+  it("returns cleared + a signed receipt token instead of a payment answer, without leaking 'exempt' or the reason", async () => {
+    process.env.AUTH_SECRET = "test-secret";
+    mockedPrisma.student.findFirst.mockResolvedValue({ ...baseStudent, isExempt: true, exemptReason: "Scholarship" } as any);
+
+    const res = await POST(makeRequest(validBody));
+    const data = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(data.cleared).toBe(true);
+    expect(data.fullName).toBe("Kwame Mensah");
+    expect(typeof data.receiptToken).toBe("string");
+    expect(JSON.stringify(data).toLowerCase()).not.toContain("exempt");
+    expect(JSON.stringify(data)).not.toContain("Scholarship");
+  });
 });
 
 describe("POST /api/students/lookup", () => {

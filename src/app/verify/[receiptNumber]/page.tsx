@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { headers } from "next/headers";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isReceiptValid } from "@/lib/receipt-validity";
 
 // Public by design - this is exactly what the QR code on a printed/forwarded
 // receipt is for: anyone holding the paper (or a photo of it) can confirm
@@ -44,7 +45,8 @@ export default async function VerifyReceiptPage({ params }: { params: { receiptN
     },
   });
 
-  const isValid = !!receipt && receipt.payment.status === "SUCCESS";
+  const isClearance = receipt?.kind === "CLEARANCE";
+  const isValid = isReceiptValid(receipt);
 
   return (
     <main className="portal-shell flex min-h-screen flex-col items-center justify-center gap-4 px-4 text-center">
@@ -55,7 +57,9 @@ export default async function VerifyReceiptPage({ params }: { params: { receiptN
               <span className="text-2xl text-emerald-700">✓</span>
             </div>
             <div>
-              <h1 className="text-xl font-bold text-portal-text">Valid Receipt</h1>
+              <h1 className="text-xl font-bold text-portal-text">
+                {isClearance ? "Valid Receipt: Dues Cleared" : "Valid Receipt"}
+              </h1>
               <p className="text-sm text-portal-muted">
                 This receipt matches our records for {receipt!.department.name}.
               </p>
@@ -65,11 +69,19 @@ export default async function VerifyReceiptPage({ params }: { params: { receiptN
               <Row label="Student Name" value={receipt!.student.fullName} />
               <Row label="Reference No." value={receipt!.student.referenceNumber} />
               <Row label="Department" value={receipt!.department.name} />
-              <Row label="Payment Type" value={receipt!.payment.paymentType === "FRESHER" ? "Fresher" : "Continuing"} />
-              <Row
-                label="Amount Paid"
-                value={`${receipt!.payment.currency} ${formatAmount(Number(receipt!.payment.amount))}`}
-              />
+              {isClearance ? (
+                // No amount for a clearance, and never the word "exempt" or
+                // the reason - those are admin-only.
+                <Row label="Status" value="Dues Cleared" />
+              ) : (
+                <>
+                  <Row label="Payment Type" value={receipt!.payment!.paymentType === "FRESHER" ? "Fresher" : "Continuing"} />
+                  <Row
+                    label="Amount Paid"
+                    value={`${receipt!.payment!.currency} ${formatAmount(Number(receipt!.payment!.amount))}`}
+                  />
+                </>
+              )}
               <Row label="Date Issued" value={formatDate(receipt!.issuedAt)} />
             </dl>
           </>

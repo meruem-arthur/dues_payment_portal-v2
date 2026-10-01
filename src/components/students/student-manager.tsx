@@ -16,6 +16,8 @@ type Student = {
   hasPendingPayment: boolean;
   lastFailedPayment: { reason: string | null; failedAt: string } | null;
   registrationSource: "ADMIN" | "SELF";
+  isExempt: boolean;
+  exemptReason: string | null;
 };
 
 const emptyForm = {
@@ -30,9 +32,13 @@ const emptyForm = {
 export function StudentManager({
   departmentId,
   academicSessionId,
+  isSuperAdmin = false,
 }: {
   departmentId?: string;
   academicSessionId: string;
+  // Only the super admin gets the clearance controls. This is UI only - the
+  // /exempt, /clearance-receipt and resend routes enforce it server-side.
+  isSuperAdmin?: boolean;
 }) {
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,6 +47,7 @@ export function StudentManager({
   const [levelFilter, setLevelFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [exemptFilter, setExemptFilter] = useState("");
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [addForm, setAddForm] = useState(emptyForm);
@@ -69,6 +76,7 @@ export function StudentManager({
     if (levelFilter) params.set("level", levelFilter);
     if (statusFilter) params.set("paymentStatus", statusFilter);
     if (sourceFilter) params.set("registrationSource", sourceFilter);
+    if (exemptFilter) params.set("exempt", exemptFilter);
     try {
       const res = await fetch(`/api/students?${params.toString()}`);
       const data = await res.json().catch(() => ({}));
@@ -84,7 +92,7 @@ export function StudentManager({
     } finally {
       setLoading(false);
     }
-  }, [departmentId, search, levelFilter, statusFilter, sourceFilter]);
+  }, [departmentId, search, levelFilter, statusFilter, sourceFilter, exemptFilter]);
 
   useEffect(() => {
     fetchStudents();
@@ -177,6 +185,62 @@ export function StudentManager({
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [checkResult, setCheckResult] = useState<{ id: string; text: string; tone: "ok" | "warn" | "error" } | null>(null);
 
+  // ---- Dues Cleared (super admin only) ---------------------------------
+  const [clearingId, setClearingId] = useState<string | null>(null);
+  const [clearResult, setClearResult] = useState<{ id: string; text: string; tone: "ok" | "error" } | null>(null);
+
+  async function markDuesCleared(student: Student) {
+    const reason = prompt(`Mark ${student.fullName} as Dues Cleared? Enter the reason (admin-only, never shown to the student):`);
+    if (reason === null) return;
+    if (reason.trim().length < 3) {
+      setClearResult({ id: student.id, text: "A reason is required", tone: "error" });
+      return;
+    }
+    setClearingId(student.id);
+    setClearResult(null);
+    try {
+      const res = await fetch(`/api/students/${student.id}/exempt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setClearResult({ id: student.id, text: data.error ?? "Could not mark as Dues Cleared", tone: "error" });
+        return;
+      }
+      const emailText =
+        data.email?.status === "SENT"
+          ? "clearance email sent"
+          : `email not sent${data.email?.reason ? ` (${data.email.reason})` : ""} - you can still download the PDF`;
+      setClearResult({ id: student.id, text: `Cleared - receipt ${data.receiptNumber}, ${emailText}`, tone: "ok" });
+      fetchStudents();
+    } finally {
+      setClearingId(null);
+    }
+  }
+
+  async function removeClearance(student: Student) {
+    if (!confirm(`Remove ${student.fullName}'s clearance? Their clearance receipt will stop being valid and they will have to pay.`)) return;
+    setClearingId(student.id);
+    setClearResult(null);
+    try {
+      const res = await fetch(`/api/students/${student.id}/exempt`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setClearResult({ id: student.id, text: data.error ?? "Could not remove the clearance", tone: "error" });
+        return;
+      }
+      fetchStudents();
+    } finally {
+      setClearingId(null);
+    }
+  }
+
+  function downloadClearanceReceipt(student: Student) {
+    window.open(`/api/students/${student.id}/clearance-receipt`, "_blank");
+  }
+
   async function resendStudentReceipt(student: Student) {
     if (
       !confirm(
@@ -197,7 +261,10 @@ export function StudentManager({
       const parts: string[] = [];
       if (data.sms !== "SKIPPED") parts.push(`SMS ${data.sms.toLowerCase()}`);
       if (data.email !== "SKIPPED") parts.push(`Email ${data.email.toLowerCase()}`);
-      setResendResult({ id: student.id, text: parts.length ? parts.join(", ") : "Nothing to resend (SMS/email disabled or no email on file)" });
+      setResendResult({
+        id: student.id,
+        text: parts.length ? parts.join(", ") : data.emailReason ?? "Nothing to resend (SMS/email disabled or no email on file)",
+      });
     } finally {
       setResendingId(null);
     }
@@ -312,6 +379,11 @@ export function StudentManager({
           <option value="SELF">Self-registered</option>
           <option value="ADMIN">Added by admin</option>
         </select>
+        <select className="admin-input max-w-[150px]" value={exemptFilter} onChange={(e) => setExemptFilter(e.target.value)}>
+          <option value="">All Students</option>
+          <option value="true">Exempt only</option>
+          <option value="false">Not exempt</option>
+        </select>
         <div className="ml-auto flex items-center gap-2">
           <button
             className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-muted shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-md transition-colors hover:bg-white/10 hover:text-admin-text disabled:opacity-60"
@@ -368,8 +440,21 @@ export function StudentManager({
                 <td className="p-3">{s.level.replace("L", "")}</td>
                 <td className="p-3">{s.phone}</td>
                 <td className="p-3">
+                  {s.isExempt && (
+                    <>
+                      <span className="rounded-full bg-sky-400/10 px-2 py-0.5 text-xs font-medium text-sky-400">Exempt</span>
+                      {s.exemptReason && (
+                        <p className="mt-1 max-w-[220px] truncate text-xs text-sky-400/70" title={s.exemptReason}>
+                          {s.exemptReason}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {clearResult?.id === s.id && (
+                    <p className={`mt-1 text-xs ${clearResult.tone === "ok" ? "text-accent" : "text-red-400"}`}>{clearResult.text}</p>
+                  )}
                   <span
-                    className={
+                    className={s.isExempt ? "hidden" : 
                       s.paymentStatus === "SUCCESS"
                         ? "text-accent"
                         : s.hasPendingPayment
@@ -441,6 +526,36 @@ export function StudentManager({
                     >
                       {cancellingId === s.id ? "Cancelling..." : "Cancel Pending Payment"}
                     </button>
+                  )}
+                  {isSuperAdmin && !s.isExempt && s.level !== "L100" && s.paymentStatus !== "SUCCESS" && !s.hasPendingPayment && (
+                    <button
+                      className="text-sky-400 hover:underline disabled:opacity-50"
+                      onClick={() => markDuesCleared(s)}
+                      disabled={clearingId === s.id}
+                    >
+                      {clearingId === s.id ? "Working..." : "Mark Dues Cleared"}
+                    </button>
+                  )}
+                  {isSuperAdmin && s.isExempt && (
+                    <>
+                      <button className="text-accent hover:underline" onClick={() => downloadClearanceReceipt(s)}>
+                        Download Clearance Receipt
+                      </button>
+                      <button
+                        className="text-accent hover:underline disabled:opacity-50"
+                        onClick={() => resendStudentReceipt(s)}
+                        disabled={resendingId === s.id}
+                      >
+                        {resendingId === s.id ? "Sending..." : "Send Clearance Receipt"}
+                      </button>
+                      <button
+                        className="text-amber-400 hover:underline disabled:opacity-50"
+                        onClick={() => removeClearance(s)}
+                        disabled={clearingId === s.id}
+                      >
+                        Remove Clearance
+                      </button>
+                    </>
                   )}
                   {s.paymentStatus === "SUCCESS" && (
                     <button

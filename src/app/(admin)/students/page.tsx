@@ -42,7 +42,11 @@ export default async function StudentsPage({
         <h1 className="text-2xl font-semibold">Students</h1>
         {user.role === "SUPER_ADMIN" && <DepartmentSwitcher departments={departments} activeId={departmentId!} />}
       </div>
-      <StudentManager departmentId={departmentId} academicSessionId={activeDept.academicSessionId} />
+      <StudentManager
+        departmentId={departmentId}
+        academicSessionId={activeDept.academicSessionId}
+        isSuperAdmin={user.role === "SUPER_ADMIN"}
+      />
     </div>
   );
 }

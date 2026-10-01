@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Spinner } from "@/components/ui/spinner";
+import { ReceiptActions } from "@/components/receipts/receipt-actions";
 
 export function PayButton({
   departmentSlug,
@@ -23,7 +24,10 @@ export function PayButton({
   // exist, so instead of trusting what's typed, "confirm" looks their
   // record up and shows their real name from the DB - a genuine "is this
   // you?" check, not just a recap.
-  const [step, setStep] = useState<"form" | "confirm">("form");
+  // "cleared" is for a student a super admin has marked Dues Cleared: the
+  // review screen says so and offers the receipt instead of "Confirm & Pay".
+  const [step, setStep] = useState<"form" | "confirm" | "cleared">("form");
+  const [receiptToken, setReceiptToken] = useState<string | null>(null);
   const [fullName, setFullName] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
   const [phone, setPhone] = useState("");
@@ -65,6 +69,11 @@ export function PayButton({
         return;
       }
       setFullName(data.fullName);
+      if (data.cleared && data.receiptToken) {
+        setReceiptToken(data.receiptToken);
+        setStep("cleared");
+        return;
+      }
       setStep("confirm");
     } catch {
       setError("Could not look up that reference number. Please try again.");
@@ -103,6 +112,7 @@ export function PayButton({
   function reset() {
     setOpen(autoOpen);
     setStep("form");
+    setReceiptToken(null);
     setError(null);
   }
 
@@ -111,6 +121,34 @@ export function PayButton({
       <button className="portal-btn-primary w-full" onClick={() => setOpen(true)}>
         Pay Now
       </button>
+    );
+  }
+
+  if (step === "cleared" && receiptToken) {
+    return (
+      <div className="space-y-3 text-left">
+        <div className="rounded-md border border-portal-border p-3">
+          <p className="text-sm font-semibold text-portal-text">Dues Cleared</p>
+          <p className="mt-1 text-xs text-portal-muted">No payment is needed. Continue only if this is you.</p>
+          <dl className="mt-3 space-y-1.5 text-sm">
+            <div className="flex justify-between gap-3">
+              <dt className="text-portal-muted">Full Name</dt>
+              <dd className="text-portal-text">{fullName}</dd>
+            </div>
+            <div className="flex justify-between gap-3">
+              <dt className="text-portal-muted">Reference Number</dt>
+              <dd className="text-portal-text">{referenceNumber}</dd>
+            </div>
+          </dl>
+        </div>
+        <ReceiptActions
+          downloadUrl={`/api/receipts/clearance?token=${encodeURIComponent(receiptToken)}`}
+          fileName="dues-clearance-receipt.pdf"
+        />
+        <button type="button" className="portal-btn-secondary w-full" onClick={() => setStep("form")}>
+          Edit Details
+        </button>
+      </div>
     );
   }
 

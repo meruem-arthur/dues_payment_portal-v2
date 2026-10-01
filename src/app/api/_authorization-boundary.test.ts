@@ -23,6 +23,9 @@ vi.mock("@/lib/db", () => ({
   prisma: {
     student: { findUniqueOrThrow: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
     department: { findUnique: vi.fn() },
+    payment: { findFirst: vi.fn() },
+    receipt: { updateMany: vi.fn() },
+    $transaction: vi.fn(),
   },
 }));
 
@@ -41,6 +44,9 @@ import { POST as postStudent } from "@/app/api/students/route";
 import { POST as postCsvUpload } from "@/app/api/students/csv-upload/route";
 import { GET as getDepartmentStats } from "@/app/api/departments/[id]/stats/route";
 import { GET as getDepartment } from "@/app/api/departments/[id]/route";
+import { POST as postExempt, DELETE as deleteExempt } from "@/app/api/students/[id]/exempt/route";
+import { GET as getClearanceReceipt } from "@/app/api/students/[id]/clearance-receipt/route";
+import { POST as postResendReceipt } from "@/app/api/students/[id]/resend-receipt/route";
 
 const mockedPrisma = vi.mocked(prisma, true);
 const mockedGetServerSession = vi.mocked(getServerSession);
@@ -175,3 +181,94 @@ describe("POST /api/students/csv-upload - departmentId smuggling on bulk create"
     expect(data.validRows?.[0]?.departmentId).toBe("dept_a");
   });
 });
+
+describe("Dues Cleared routes - super admin only, even within the admin's own department", () => {
+  const ownStudent = {
+    id: "student_own",
+    departmentId: "dept_a", // the admin's OWN department - still must be refused
+    academicSessionId: "session_1",
+    referenceNumber: "REF-OWN",
+    level: "L300",
+    paymentStatus: "PENDING",
+    isExempt: true,
+  };
+  const ctx = { params: { id: "student_own" } };
+
+  it("POST /exempt rejects a department admin", async () => {
+    asDeptAAdmin();
+    const req = new NextRequest("http://localhost/api/students/student_own/exempt", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "Scholarship" }),
+    });
+    const res = await postExempt(req, ctx);
+    expect(res.status).toBe(403);
+    expect(mockedPrisma.student.update).not.toHaveBeenCalled();
+  });
+
+  it("DELETE /exempt rejects a department admin", async () => {
+    asDeptAAdmin();
+    const res = await deleteExempt(new NextRequest("http://localhost/api/students/student_own/exempt", { method: "DELETE" }), ctx);
+    expect(res.status).toBe(403);
+    expect(mockedPrisma.student.update).not.toHaveBeenCalled();
+  });
+
+  it("GET /clearance-receipt rejects a department admin", async () => {
+    asDeptAAdmin();
+    const res = await getClearanceReceipt(new NextRequest("http://localhost/api/students/student_own/clearance-receipt"), ctx);
+    expect(res.status).toBe(403);
+  });
+
+  it("POST /resend-receipt rejects a department admin on a cleared student", async () => {
+    asDeptAAdmin();
+    mockedPrisma.student.findUniqueOrThrow.mockResolvedValue(ownStudent as any);
+    const res = await postResendReceipt(new NextRequest("http://localhost/api/students/student_own/resend-receipt", { method: "POST" }), ctx);
+    expect(res.status).toBe(403);
+  });
+
+  it("PATCH refuses to move a cleared student to Level 100", async () => {
+    asDeptAAdmin();
+    mockedPrisma.student.findUniqueOrThrow.mockResolvedValue(ownStudent as any);
+    const req = new NextRequest("http://localhost/api/students/student_own", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fullName: "Own Student", referenceNumber: "REF-OWN", level: "L100", phone: "0501234567" }),
+    });
+    const res = await patchStudent(req, ctx);
+    expect(res.status).toBe(400);
+    expect(mockedPrisma.student.update).not.toHaveBeenCalled();
+  });
+
+  it("PATCH and CSV import cannot set the exempt fields", async () => {
+    asDeptAAdmin();
+    mockedPrisma.student.findUniqueOrThrow.mockResolvedValue({ ...ownStudent, isExempt: false } as any);
+    mockedPrisma.student.update.mockResolvedValue({ ...ownStudent, isExempt: false } as any);
+    const req = new NextRequest("http://localhost/api/students/student_own", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        fullName: "Own Student", referenceNumber: "REF-OWN", level: "L300", phone: "0501234567",
+        isExempt: true, exemptReason: "smuggled",
+      }),
+    });
+    await patchStudent(req, ctx);
+    const updateData = (mockedPrisma.student.update.mock.calls[0]?.[0] as any)?.data ?? {};
+    expect(updateData).not.toHaveProperty("isExempt");
+    expect(updateData).not.toHaveProperty("exemptReason");
+
+    mockedPrisma.student.findMany.mockResolvedValue([]);
+    const csvReq = new NextRequest("http://localhost/api/students/csv-upload", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        csvText: "name,reference_number,level,phone,isExempt\nJane Doe,REF-9,300,0501234567,true",
+        academicSessionId: "session_1",
+        dryRun: true,
+      }),
+    });
+    const csvRes = await postCsvUpload(csvReq);
+    const csvData = await csvRes.json();
+    expect(csvData.validRows?.[0]).not.toHaveProperty("isExempt");
+  });
+});
+

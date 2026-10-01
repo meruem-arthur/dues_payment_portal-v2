@@ -6,17 +6,19 @@ import { captureError } from "@/lib/monitoring/capture-error";
 import { generateReceiptPdf } from "@/lib/receipts-pdf";
 
 /**
- * Generates a receipt number in the form REC-<year>-<zero-padded sequence>.
+ * Generates a receipt number in the form <prefix>-<year>-<zero-padded sequence>.
+ * Payment receipts use the default REC prefix; clearance receipts use CLR,
+ * which is its own series (CLR-2026-000001) counted independently.
  * Uses a transaction-safe count query; for high concurrency this could be
  * swapped for a DB sequence, but is sufficient for department-dues volumes.
  */
-export async function generateReceiptNumber(): Promise<string> {
+export async function generateReceiptNumber(prefix: string = "REC"): Promise<string> {
   const year = new Date().getFullYear();
   const count = await prisma.receipt.count({
-    where: { receiptNumber: { startsWith: `REC-${year}-` } },
+    where: { receiptNumber: { startsWith: `${prefix}-${year}-` } },
   });
   const next = (count + 1).toString().padStart(6, "0");
-  return `REC-${year}-${next}`;
+  return `${prefix}-${year}-${next}`;
 }
 
 /**
@@ -311,4 +313,172 @@ async function sendEmailReceipt(
   // Same rule as SMS: email failure must NEVER change payment/receipt state.
   if (result.success) return "SENT" as const;
   return "FAILED" as const;
+}
+
+// ---------------------------------------------------------------------------
+// "Dues Cleared" (exempt) students
+// ---------------------------------------------------------------------------
+
+/**
+ * Issues the clearance receipt for a student a super admin has just marked
+ * "Dues Cleared". Database work only - the email is sendClearanceEmail().
+ *
+ * Each student has at most one clearance receipt (unique on studentId +
+ * kind). If the clearance was removed earlier (receipt voided) and is now
+ * granted again, the SAME receipt - same number - is revived rather than a
+ * second one created, so a receipt number is never reused for a different
+ * meaning and never orphaned.
+ *
+ * Safe to call twice: exactly one caller gets `created: true`.
+ */
+export async function issueClearanceReceipt(studentId: string) {
+  const student = await prisma.student.findUniqueOrThrow({ where: { id: studentId } });
+  if (!student.isExempt) {
+    throw new Error("Cannot issue a clearance receipt for a student who is not marked Dues Cleared");
+  }
+
+  const existing = await prisma.receipt.findFirst({ where: { studentId, kind: "CLEARANCE" } });
+  if (existing) {
+    if (!existing.voidedAt) return { receipt: existing, created: false };
+    const revived = await prisma.receipt.update({
+      where: { id: existing.id },
+      data: { voidedAt: null, issuedAt: new Date() },
+    });
+    return { receipt: revived, created: true };
+  }
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const receiptNumber = await generateReceiptNumber("CLR");
+    try {
+      const receipt = await prisma.receipt.create({
+        data: {
+          receiptNumber,
+          kind: "CLEARANCE",
+          studentId: student.id,
+          departmentId: student.departmentId,
+        },
+      });
+      return { receipt, created: true };
+    } catch (err: any) {
+      if (err?.code !== "P2002") throw err;
+      // Either another caller just issued this student's clearance receipt,
+      // or the number itself collided - same handling as issueReceipt().
+      const winner = await prisma.receipt.findFirst({ where: { studentId, kind: "CLEARANCE" } });
+      if (winner) return { receipt: winner, created: false };
+    }
+  }
+
+  throw new Error("Could not allocate a unique clearance receipt number after several attempts");
+}
+
+export type ClearanceEmailResult = {
+  status: "SENT" | "FAILED" | "SKIPPED";
+  // Human-readable explanation for anything other than SENT, shown to the
+  // super admin so they know why nothing arrived (and can still download
+  // the PDF from the student row).
+  reason?: string;
+};
+
+/**
+ * Builds the clearance receipt PDF for a student. Returns null when the
+ * student is not currently cleared or has no active (non-voided) clearance
+ * receipt - callers treat that as "nothing to give out".
+ */
+export async function buildClearanceReceiptPdf(studentId: string) {
+  const student = await prisma.student.findUnique({
+    where: { id: studentId },
+    include: {
+      academicSession: true,
+      department: true,
+      receipts: { where: { kind: "CLEARANCE" } },
+    },
+  });
+  const receipt = student?.receipts[0];
+  if (!student || !student.isExempt || !receipt || receipt.voidedAt) return null;
+
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL;
+  const pdfBytes = await generateReceiptPdf({
+    receiptNumber: receipt.receiptNumber,
+    issuedAt: receipt.issuedAt,
+    kind: "CLEARANCE",
+    department: student.department,
+    student,
+    academicSessionName: student.academicSession.name,
+    verifyUrl: baseUrl ? `${baseUrl}/verify/${receipt.receiptNumber}` : null,
+  });
+
+  return { pdfBytes, receiptNumber: receipt.receiptNumber, student };
+}
+
+/**
+ * Emails a student their clearance receipt. Same rule as any other receipt:
+ * only sent if the student has an email on file AND the department's email
+ * setting is on. The wording is its own (the department's "payment of
+ * {amount}" template makes no sense here) and the PDF is attached.
+ *
+ * No SMS is ever sent for clearances. Never throws for delivery problems -
+ * returns a SKIPPED/FAILED result with a reason instead, and a failed send
+ * is recorded in NotificationLog like other notification failures.
+ */
+export async function sendClearanceEmail(studentId: string): Promise<ClearanceEmailResult> {
+  const student = await prisma.student.findUnique({
+    where: { id: studentId },
+    include: {
+      academicSession: true,
+      department: { include: { emailConfig: true } },
+      receipts: { where: { kind: "CLEARANCE" } },
+    },
+  });
+  const receipt = student?.receipts[0];
+  if (!student || !student.isExempt || !receipt || receipt.voidedAt) {
+    return { status: "SKIPPED", reason: "This student has no active clearance receipt" };
+  }
+
+  const emailConfig = student.department.emailConfig;
+  if (!emailConfig || !emailConfig.enabled) {
+    return { status: "SKIPPED", reason: "Email receipts are turned off for this department" };
+  }
+  if (!student.email) {
+    return { status: "SKIPPED", reason: "This student has no email address on file" };
+  }
+
+  let attachments: { filename: string; content: Buffer; contentType: string }[] | undefined;
+  try {
+    const built = await buildClearanceReceiptPdf(studentId);
+    if (built) {
+      attachments = [
+        { filename: `${receipt.receiptNumber}.pdf`, content: Buffer.from(built.pdfBytes), contentType: "application/pdf" },
+      ];
+    }
+  } catch (e) {
+    // A PDF build failure must never block the email itself.
+    captureError(e, { context: "clearance-pdf-for-email", studentId });
+  }
+
+  const body =
+    `Dear ${student.fullName}, your dues for ${student.department.name} (${student.academicSession.name}) ` +
+    `have been cleared. No payment is required from you. ` +
+    `Reference: ${student.referenceNumber}. Clearance receipt: ${receipt.receiptNumber}.` +
+    (attachments ? " Your clearance receipt is attached." : "");
+
+  const result = await getEmailProvider().send({
+    to: student.email,
+    subject: `${student.department.name} dues clearance - ${receipt.receiptNumber}`,
+    body,
+    from: emailConfig.fromAddress ?? undefined,
+    attachments,
+  });
+
+  await prisma.notificationLog.create({
+    data: {
+      departmentId: student.departmentId,
+      channel: "EMAIL",
+      recipient: student.email,
+      status: result.success ? "SENT" : "FAILED",
+      errorMessage: result.error,
+    },
+  });
+
+  if (result.success) return { status: "SENT" };
+  return { status: "FAILED", reason: result.error ?? "The email provider could not send the message" };
 }

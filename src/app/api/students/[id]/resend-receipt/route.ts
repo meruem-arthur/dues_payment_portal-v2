@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { captureError } from "@/lib/monitoring/capture-error";
 import { prisma } from "@/lib/db";
 import { requireDepartmentAccess, UnauthorizedError, ForbiddenError } from "@/lib/authorization";
-import { resendReceipt } from "@/lib/receipts";
+import { resendReceipt, sendClearanceEmail } from "@/lib/receipts";
 import { logAudit } from "@/lib/audit";
 
 // POST /api/students/[id]/resend-receipt
@@ -26,6 +26,25 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
   try {
     const student = await prisma.student.findUniqueOrThrow({ where: { id: params.id } });
     const user = await requireDepartmentAccess(student.departmentId);
+
+    // Dues Cleared student: same route, different branch. Resends the
+    // clearance email (no SMS). Only the super admin may do this, matching
+    // the other clearance controls; paid students are unchanged below.
+    if (student.isExempt) {
+      if (user.role !== "SUPER_ADMIN") {
+        return NextResponse.json({ error: "Super admin only" }, { status: 403 });
+      }
+      const email = await sendClearanceEmail(student.id);
+      await logAudit({
+        userId: user.id,
+        departmentId: student.departmentId,
+        action: "CLEARANCE_RECEIPT_RESENT",
+        entity: "Student",
+        entityId: student.id,
+        metadata: { referenceNumber: student.referenceNumber, emailResult: email.status },
+      });
+      return NextResponse.json({ sms: "SKIPPED", email: email.status, emailReason: email.reason });
+    }
 
     const payment = await prisma.payment.findFirst({
       where: { studentId: student.id, status: "SUCCESS" },

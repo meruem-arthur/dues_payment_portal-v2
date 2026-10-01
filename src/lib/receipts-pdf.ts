@@ -17,13 +17,17 @@ export type ReceiptPdfData = {
     referenceNumber: string;
     level: string; // "L100".."L400"
   };
-  payment: {
+  // "PAYMENT" (default) or "CLEARANCE" - a clearance receipt has no payment
+  // behind it, is titled "Dues Clearance" and shows no amount or provider.
+  kind?: "PAYMENT" | "CLEARANCE";
+  // Required for PAYMENT receipts, omitted for CLEARANCE receipts.
+  payment?: {
     amount: number;
     currency: string;
     paymentType: "FRESHER" | "CONTINUING";
     provider: string; // "PAYSTACK" | "HUBTEL"
     paidAt: Date | null;
-  };
+  } | null;
   academicSessionName: string;
   // Fully-resolved link to the public /verify/[receiptNumber] page. Optional
   // and additive: when omitted (e.g. NEXT_PUBLIC_APP_URL isn't set, or an
@@ -111,7 +115,12 @@ export async function generateReceiptPdf(data: ReceiptPdfData): Promise<Uint8Arr
     font: boldFont,
     color: rgb(0.1, 0.1, 0.1),
   });
-  page.drawText("OFFICIAL PAYMENT RECEIPT", {
+  const isClearance = data.kind === "CLEARANCE";
+  if (!isClearance && !data.payment) {
+    throw new Error("A payment receipt needs payment details");
+  }
+
+  page.drawText(isClearance ? "DUES CLEARANCE" : "OFFICIAL PAYMENT RECEIPT", {
     x: logo ? MARGIN + 52 : MARGIN,
     y: y - 36,
     size: 10,
@@ -131,15 +140,20 @@ export async function generateReceiptPdf(data: ReceiptPdfData): Promise<Uint8Arr
 
   // --- Body -----------------------------------------------------------
   const levelDisplay = data.student.level.replace(/^L/, "");
+  const payment = data.payment;
   const rows: [string, string][] = [
     ["Student Name", data.student.fullName],
     ["Reference No.", data.student.referenceNumber],
     ["Level", levelDisplay],
     ["Academic Session", data.academicSessionName],
-    ["Payment Type", data.payment.paymentType === "FRESHER" ? "Fresher" : "Continuing"],
-    ["Amount Paid", formatAmount(data.payment.amount, data.payment.currency)],
-    ["Payment Method", data.payment.provider === "PAYSTACK" ? "Paystack" : "Hubtel"],
-    ...(data.payment.paidAt ? ([["Date Paid", formatDate(data.payment.paidAt)]] as [string, string][]) : []),
+    ...(isClearance || !payment
+      ? ([["Status", "Dues Cleared"]] as [string, string][])
+      : ([
+          ["Payment Type", payment.paymentType === "FRESHER" ? "Fresher" : "Continuing"],
+          ["Amount Paid", formatAmount(payment.amount, payment.currency)],
+          ["Payment Method", payment.provider === "PAYSTACK" ? "Paystack" : "Hubtel"],
+          ...(payment.paidAt ? ([["Date Paid", formatDate(payment.paidAt)]] as [string, string][]) : []),
+        ] as [string, string][])),
   ];
 
   for (const [label, value] of rows) {

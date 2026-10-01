@@ -52,7 +52,7 @@ describe("generateReceiptPdf", () => {
   it("handles a FRESHER payment with no paidAt", async () => {
     const bytes = await generateReceiptPdf({
       ...baseData,
-      payment: { ...baseData.payment, paymentType: "FRESHER", paidAt: null },
+      payment: { ...baseData.payment!, paymentType: "FRESHER", paidAt: null },
     });
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBe(1);
@@ -71,5 +71,16 @@ describe("generateReceiptPdf", () => {
     const bytes = await generateReceiptPdf(baseData);
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBe(1);
+  });
+  it("builds a single-page clearance receipt with no payment details", async () => {
+    const { payment: _omit, ...rest } = baseData;
+    const bytes = await generateReceiptPdf({ ...rest, kind: "CLEARANCE", receiptNumber: "CLR-2026-000001", verifyUrl: "https://example.com/verify/CLR-2026-000001" });
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it("refuses to build a payment receipt without payment details", async () => {
+    const { payment: _omit, ...rest } = baseData;
+    await expect(generateReceiptPdf(rest)).rejects.toThrow(/payment details/);
   });
 });

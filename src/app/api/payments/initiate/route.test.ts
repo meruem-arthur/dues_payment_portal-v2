@@ -326,3 +326,15 @@ describe("POST /api/payments/initiate", () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe("POST /api/payments/initiate - Dues Cleared students", () => {
+  it("hard-blocks a cleared student before any payment record or provider call", async () => {
+    mockedPrisma.student.findFirst.mockResolvedValue({ ...baseStudent, isExempt: true } as any);
+
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(409);
+    expect(mockedPrisma.payment.create).not.toHaveBeenCalled();
+    expect(mockedGetPaymentProvider).not.toHaveBeenCalled();
+  });
+});
+

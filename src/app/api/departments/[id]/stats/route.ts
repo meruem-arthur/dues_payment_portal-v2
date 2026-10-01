@@ -19,7 +19,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
           select: { id: true, name: true, code: true, fresherAmount: true, continuingAmount: true },
         }),
         prisma.student.groupBy({
-          by: ["level", "paymentStatus"],
+          by: ["level", "paymentStatus", "isExempt"],
           where: { departmentId },
           _count: { _all: true },
         }),
@@ -59,11 +59,15 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     }
 
     // --- Student totals & level breakdown ---
-    const levelMap = new Map<string, { total: number; paid: number; pending: number }>();
+    // "total" stays the full headcount (exempt students included). Exempt
+    // students are counted separately and excluded from what is expected /
+    // outstanding, since they owe nothing.
+    const levelMap = new Map<string, { total: number; paid: number; pending: number; exempt: number }>();
     for (const row of studentsByLevel) {
-      const entry = levelMap.get(row.level) ?? { total: 0, paid: 0, pending: 0 };
+      const entry = levelMap.get(row.level) ?? { total: 0, paid: 0, pending: 0, exempt: 0 };
       entry.total += row._count._all;
-      if (row.paymentStatus === "SUCCESS") entry.paid += row._count._all;
+      if (row.isExempt) entry.exempt += row._count._all;
+      else if (row.paymentStatus === "SUCCESS") entry.paid += row._count._all;
       else if (row.paymentStatus === "PENDING") entry.pending += row._count._all;
       levelMap.set(row.level, entry);
     }
@@ -75,7 +79,8 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
     const totalStudents = levelBreakdown.reduce((sum, l) => sum + l.total, 0);
     const paidStudents = levelBreakdown.reduce((sum, l) => sum + l.paid, 0);
-    const pendingStudents = totalStudents - paidStudents;
+    const exemptStudents = levelBreakdown.reduce((sum, l) => sum + l.exempt, 0);
+    const pendingStudents = totalStudents - paidStudents - exemptStudents;
 
     // L100 students are fresh admissions (billed at fresherAmount); every
     // other level is billed at continuingAmount. This mirrors how the
@@ -85,7 +90,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     const continuingAmount = Number(department.continuingAmount);
     const expectedTotal = levelBreakdown.reduce((sum, l) => {
       const rate = l.level === "L100" ? fresherAmount : continuingAmount;
-      return sum + l.total * rate;
+      return sum + (l.total - l.exempt) * rate;
     }, 0);
 
     // --- Payment status breakdown ---
@@ -121,7 +126,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
         fresherAmount,
         continuingAmount,
       },
-      totals: { totalStudents, paidStudents, pendingStudents, totalCollected, expectedTotal },
+      totals: { totalStudents, paidStudents, pendingStudents, exemptStudents, totalCollected, expectedTotal },
       paymentStatusCounts,
       levelBreakdown,
       trend,

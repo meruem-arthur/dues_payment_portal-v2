@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { captureError } from "@/lib/monitoring/capture-error";
 import { prisma } from "@/lib/db";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { createClearanceToken } from "@/lib/clearance-token";
 import { z } from "zod";
 
 const lookupSchema = z.object({
@@ -63,7 +64,7 @@ export async function POST(req: NextRequest) {
         academicSessionId: department.academicSessionId,
         referenceNumber: input.referenceNumber,
       },
-      select: { fullName: true, level: true, paymentStatus: true },
+      select: { id: true, fullName: true, level: true, paymentStatus: true, isExempt: true },
     });
     if (!student) {
       return NextResponse.json({ error: "No student found with that reference number in this department" }, { status: 404 });
@@ -76,6 +77,18 @@ export async function POST(req: NextRequest) {
           ? "You're registered as a Level 100 student — use the First Year link"
           : "You're registered as a continuing student - use the continuing student link";
       return NextResponse.json({ error: message }, { status: 409 });
+    }
+
+    // A student a super admin has marked "Dues Cleared" never pays. Instead
+    // of a payment-related answer they get a short-lived signed token for
+    // downloading their clearance receipt (see /api/receipts/clearance).
+    // Publicly this is only ever "cleared" - never "exempt", never why.
+    if (student.isExempt) {
+      return NextResponse.json({
+        cleared: true,
+        fullName: student.fullName,
+        receiptToken: createClearanceToken(student.id),
+      });
     }
 
     if (student.paymentStatus === "SUCCESS") {

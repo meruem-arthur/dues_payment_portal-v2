@@ -158,6 +158,16 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // Hard server-side block: a "Dues Cleared" student must never reach the
+    // payment provider, whatever the client (or a hand-crafted request)
+    // does. The public wording is always "Dues Cleared" - never "exempt".
+    if (student.isExempt) {
+      return NextResponse.json(
+        { error: "Your dues are cleared - no payment is needed. Check your reference number on the payment page to get your receipt." },
+        { status: 409 }
+      );
+    }
+
     // We don't do refunds, so a student who has already paid must never be
     // able to start a second payment flow - whether that's a double-click,
     // reopening an old link after paying, or a parent scanning the same QR
