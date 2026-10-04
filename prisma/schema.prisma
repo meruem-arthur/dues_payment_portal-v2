@@ -406,6 +406,20 @@ model EmailConfiguration {
   @@map("email_configurations")
 }
 
+// System-wide Contact Support destination. Exactly one row (id "singleton"),
+// edited by the super admin under Settings. Student support requests from
+// every department's public payment page are sent to this email (via the
+// shared email provider) and this phone number (via the SMS config of the
+// department the student was paying under).
+model SupportSettings {
+  id        String   @id @default("singleton")
+  email     String?
+  phone     String?
+  updatedAt DateTime @updatedAt
+
+  @@map("support_settings")
+}
+
 // ------------------------------------------------------------
 // Webhooks / notifications / audit
 // ------------------------------------------------------------

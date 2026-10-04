@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Spinner } from "@/components/ui/spinner";
 import { ReceiptActions } from "@/components/receipts/receipt-actions";
+import { ContactSupport } from "@/components/students/contact-support";
 
 export function PayButton({
   departmentSlug,
@@ -116,6 +117,20 @@ export function PayButton({
     setError(null);
   }
 
+  // Rendered outside any <form> (ContactSupport is itself a form, and nested
+  // forms are invalid HTML). Under every payment error the student can reach
+  // support straight away, with the reference number they already typed.
+  const errorNotice = error ? (
+    <div className="space-y-2">
+      <p className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-400">{error}</p>
+      <ContactSupport
+        departmentSlug={departmentSlug}
+        defaultReferenceNumber={referenceNumber}
+        label="Still stuck? Contact support"
+      />
+    </div>
+  ) : null;
+
   if (!open) {
     return (
       <button className="portal-btn-primary w-full" onClick={() => setOpen(true)}>
@@ -155,7 +170,7 @@ export function PayButton({
   if (step === "confirm") {
     return (
       <div className="space-y-3 text-left">
-        {error && <p className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-400">{error}</p>}
+        {errorNotice}
         <div className="rounded-md border border-portal-border p-3">
           <p className="text-sm font-semibold text-portal-text">Confirm your details</p>
           <p className="mt-1 text-xs text-portal-muted">
@@ -203,8 +218,9 @@ export function PayButton({
   }
 
   return (
+    <div className="space-y-3 text-left">
+    {errorNotice}
     <form onSubmit={handleFormSubmit} className="space-y-3 text-left">
-      {error && <p className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-400">{error}</p>}
       {isFresher && (
         <div>
           <label className="text-sm text-muted">Full Name</label>
@@ -234,5 +250,6 @@ export function PayButton({
         <button type="button" className="portal-btn-secondary w-full" onClick={reset}>Cancel</button>
       </div>
     </form>
+    </div>
   );
 }

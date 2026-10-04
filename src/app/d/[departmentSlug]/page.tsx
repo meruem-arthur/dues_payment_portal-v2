@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { notFound } from "next/navigation";
 import { PayButton } from "@/components/students/pay-button";
+import { ContactSupport } from "@/components/students/contact-support";
 
 export default async function PublicDepartmentPage({
   params,
@@ -86,6 +87,11 @@ export default async function PublicDepartmentPage({
             />
           </div>
         )}
+
+        <div className="mx-auto max-w-xs space-y-2 pt-2">
+          <p className="text-xs text-portal-muted">Having trouble paying?</p>
+          <ContactSupport departmentSlug={department.slug} />
+        </div>
       </div>
     </main>
   );
