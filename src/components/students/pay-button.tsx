@@ -95,7 +95,7 @@ export function PayButton({
         paymentType,
         referenceNumber,
         phone,
-        email: email || undefined,
+        email: email.trim(),
         ...(isFresher ? { fullName } : {}),
       }),
     });
@@ -239,8 +239,8 @@ export function PayButton({
         <input required className="portal-input" value={phone} onChange={(e) => setPhone(e.target.value)} />
       </div>
       <div>
-        <label className="text-sm text-muted">Email (optional)</label>
-        <input className="portal-input" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <label className="text-sm text-muted">Email</label>
+        <input required type="email" className="portal-input" value={email} onChange={(e) => setEmail(e.target.value)} />
       </div>
       <div className="flex flex-col gap-2">
         <button type="submit" disabled={lookingUp} className="portal-btn-primary flex w-full items-center justify-center gap-2">

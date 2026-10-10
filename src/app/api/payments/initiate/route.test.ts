@@ -62,6 +62,7 @@ const validBody = {
   paymentType: "CONTINUING",
   referenceNumber: "REF001",
   phone: "0551234567",
+  email: "student@example.com",
 };
 
 beforeEach(() => {
@@ -83,6 +84,14 @@ beforeEach(() => {
 });
 
 describe("POST /api/payments/initiate", () => {
+  it("rejects a request with no email (email is required)", async () => {
+    const { email: _omit, ...withoutEmail } = validBody;
+    const res = await POST(makeRequest(withoutEmail));
+
+    expect(res.status).toBe(400);
+    expect(mockedPrisma.payment.create).not.toHaveBeenCalled();
+  });
+
   it("initiates payment for a valid, unpaid continuing student", async () => {
     const res = await POST(makeRequest(validBody));
     const data = await res.json();

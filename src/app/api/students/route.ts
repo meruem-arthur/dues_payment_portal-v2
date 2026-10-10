@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { captureError } from "@/lib/monitoring/capture-error";
 import { prisma } from "@/lib/db";
-import { requireAuth, requireDepartmentAccess, scopedDepartmentWhere, UnauthorizedError, ForbiddenError } from "@/lib/authorization";
+import { requireAuth, requireDepartmentAccess, UnauthorizedError, ForbiddenError } from "@/lib/authorization";
+import { buildStudentWhere, readStudentFilterParams } from "@/lib/student-filters";
 import { studentSchema } from "@/lib/validations/student";
 import { logAudit } from "@/lib/audit";
 
@@ -10,32 +11,7 @@ export async function GET(req: NextRequest) {
     const user = await requireAuth();
     const { searchParams } = new URL(req.url);
 
-    const departmentIdParam = searchParams.get("departmentId");
-    const level = searchParams.get("level");
-    const paymentStatus = searchParams.get("paymentStatus");
-    const registrationSource = searchParams.get("registrationSource");
-    const search = searchParams.get("search");
-    const exemptParam = searchParams.get("exempt");
-
-    // scopedDepartmentWhere ignores departmentIdParam entirely for DEPARTMENT_ADMIN,
-    // so a department admin can never read another department's students by
-    // manipulating the query string.
-    const where: any = {
-      ...scopedDepartmentWhere(user, departmentIdParam),
-      ...(level ? { level } : {}),
-      ...(paymentStatus ? { paymentStatus } : {}),
-      ...(registrationSource ? { registrationSource } : {}),
-      ...(exemptParam === "true" ? { isExempt: true } : exemptParam === "false" ? { isExempt: false } : {}),
-      ...(search
-        ? {
-            OR: [
-              { fullName: { contains: search, mode: "insensitive" } },
-              { referenceNumber: { contains: search, mode: "insensitive" } },
-              { studentIndexNo: { contains: search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
-    };
+    const where = buildStudentWhere(user, readStudentFilterParams(searchParams));
 
     if (user.role === "DEPARTMENT_ADMIN" && !user.departmentId) {
       return NextResponse.json({ students: [] });

@@ -66,6 +66,8 @@ export function StudentManager({
   const [saving, setSaving] = useState(false);
 
   const [showCsvDialog, setShowCsvDialog] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const fetchStudents = useCallback(async () => {
     setLoading(true);
@@ -97,6 +99,41 @@ export function StudentManager({
   useEffect(() => {
     fetchStudents();
   }, [fetchStudents]);
+
+  // Exports exactly what the current filters select, for the department
+  // picked in the switcher. Goes through its own endpoint (not the list one)
+  // because the list is capped at 500 rows and an export must not be.
+  async function exportStudents() {
+    if (!departmentId) return;
+    setExporting(true);
+    setExportError(null);
+    const params = new URLSearchParams({ departmentId });
+    if (search) params.set("search", search);
+    if (levelFilter) params.set("level", levelFilter);
+    if (statusFilter) params.set("paymentStatus", statusFilter);
+    if (sourceFilter) params.set("registrationSource", sourceFilter);
+    if (exemptFilter) params.set("exempt", exemptFilter);
+    try {
+      const res = await fetch(`/api/students/export?${params.toString()}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setExportError(data?.error ?? `Export failed (HTTP ${res.status})`);
+        return;
+      }
+      const filename = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "students.csv";
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "Export failed (network error)");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   function openEditDialog(student: Student) {
     // Populate the LOCAL form copy from the database record. This does not
@@ -394,6 +431,11 @@ export function StudentManager({
           >
             {loading ? <Spinner /> : <RefreshCw size={16} />}
           </button>
+          {isSuperAdmin && departmentId && (
+            <button className="admin-btn-secondary disabled:opacity-60" onClick={exportStudents} disabled={exporting}>
+              {exporting ? "Exporting..." : "Export CSV"}
+            </button>
+          )}
           <button className="admin-btn-secondary" onClick={() => setShowCsvDialog(true)}>Upload CSV</button>
           <button className="admin-btn-primary" onClick={() => setShowAddDialog(true)}>Add Student</button>
           {departmentId && (
@@ -409,6 +451,7 @@ export function StudentManager({
       </div>
 
       {bulkResult && <p className="rounded-md bg-white/5 px-3 py-2 text-sm text-muted">{bulkResult}</p>}
+      {exportError && <p className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-400">{exportError}</p>}
 
       <div className="admin-card overflow-x-auto">
         <table className="w-full text-sm">

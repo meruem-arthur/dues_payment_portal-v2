@@ -16,7 +16,7 @@ const initiateSchema = z.object({
   // copy-paste would otherwise silently behave like a wrong reference number.
   referenceNumber: z.string().trim().min(1),
   phone: z.string().trim().min(9),
-  email: z.string().trim().email().optional(),
+  email: z.string().trim().email(),
   // Only ever collected on the FRESHER form, and only actually required
   // when we're about to self-register a brand-new student below - an
   // already-registered fresher paying again with a known reference number
@@ -130,7 +130,7 @@ export async function POST(req: NextRequest) {
             fullName: normalizedFullName,
             level: "L100",
             phone: input.phone,
-            email: input.email || null,
+            email: input.email,
             registrationSource: "SELF",
           },
         });
@@ -290,6 +290,11 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ authorizationUrl: result.authorizationUrl, paymentId: pendingPayment.id });
   } catch (err) {
+    // Bad input (e.g. a missing or malformed email) is the caller's mistake,
+    // not a server fault - answer 400 instead of paging Sentry with a 500.
+    if (err instanceof z.ZodError) {
+      return NextResponse.json({ error: "Please check your details - a valid email address is required." }, { status: 400 });
+    }
     captureError(err);
     // Never leak internal error/stack details to the public.
     return NextResponse.json({ error: "Could not initiate payment. Please try again." }, { status: 500 });
