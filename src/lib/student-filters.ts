@@ -44,7 +44,10 @@ export function buildStudentWhere(
           ? { isExempt: false }
           : {};
 
-  return {
+  // `any` on purpose, same as the list route had before this was extracted:
+  // the values come from query-string text, and Prisma's generated enum types
+  // (StudentLevel, PaymentStatus, QueryMode) can't be satisfied by plain strings.
+  const where: any = {
     // scopedDepartmentWhere ignores departmentId entirely for DEPARTMENT_ADMIN,
     // so a department admin can never read another department's students by
     // manipulating the query string.
@@ -63,4 +66,5 @@ export function buildStudentWhere(
         }
       : {}),
   };
+  return where;
 }
