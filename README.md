@@ -22,7 +22,8 @@ AcademicSession
    └── Department (tenant boundary)
          ├── Students
          ├── Payments → Receipts
-         ├── PaymentProviderConfiguration (own Paystack/Hubtel account)
+         ├── PaymentTypeConfiguration ×2 (Paystack/Hubtel credentials for freshers and for continuing students)
+         ├── PaymentProviderConfiguration (original single config - fallback)
          ├── SMSConfiguration
          ├── EmailConfiguration
          └── DepartmentAdmin users
@@ -97,6 +98,30 @@ endpoint — the department is resolved from the transaction reference):
 ```
 https://your-domain.com/api/webhooks/paystack
 ```
+
+### Separate accounts for freshers and continuing students
+
+Within one department, fresher dues and continuing-student dues can be paid
+into **different** Paystack (or Hubtel) accounts. Each department has one
+`PaymentTypeConfiguration` row per student type (`FRESHER`, `CONTINUING`), each
+with its own public key, secret key, webhook secret and subaccount code.
+Super Admin edits them in **Payment Settings** using the *Freshers* /
+*Continuing students* switch; saving one type never touches the other.
+
+- Which credentials a payment uses is decided in one place,
+  `src/lib/payments/resolve-config.ts`, from the payment's stored student type:
+  initiate, both webhooks and reconciliation all go through it.
+- The migration copies each department's existing credentials into both types,
+  so nothing changes until an admin saves a different set. The original
+  `PaymentProviderConfiguration` row is kept as the fallback for any
+  department/type without its own row.
+- Register the **same** webhook URL (above) in *each* Paystack business that a
+  department uses. The webhook finds the payment, then verifies the signature
+  with that payment's own type's secret key.
+- Changing a type's keys while a student is mid-payment makes that one
+  payment's webhook fail the signature check (it was signed by the old
+  account). Change keys at a quiet time; the reconcile job and the admin's
+  *Verify payment* action are the safety net for any payment that slips through.
 
 ## Dues Cleared (exempt) students
 

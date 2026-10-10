@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
 import { confirmSuccessfulPayment } from "@/lib/payments/confirm-payment";
+import { pickPaymentConfig } from "@/lib/payments/resolve-config";
 import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
 
 /**
@@ -31,16 +32,19 @@ export async function POST(req: NextRequest) {
 
   const pendingPayment = await prisma.payment.findUnique({
     where: { internalReference },
-    include: { department: { include: { paymentConfig: true, smsConfig: true } } },
+    include: { department: { include: { paymentConfig: true, paymentTypeConfigs: true, smsConfig: true } } },
   });
 
   const department = pendingPayment?.department;
-  if (!department || !department.paymentConfig) {
+  // Credentials are per student type; the type comes from our own stored
+  // Payment row, never from the webhook body.
+  const activeConfig = department && pendingPayment ? pickPaymentConfig(department, pendingPayment.paymentType) : null;
+  if (!pendingPayment || !department || !activeConfig) {
     return NextResponse.json({ error: "Unknown transaction / department" }, { status: 404 });
   }
 
   const provider = getPaymentProvider("HUBTEL");
-  const paymentConfig = decryptPaymentSecrets(department.paymentConfig);
+  const paymentConfig = decryptPaymentSecrets(activeConfig);
 
   const credentials = {
     publicKey: paymentConfig.publicKey,

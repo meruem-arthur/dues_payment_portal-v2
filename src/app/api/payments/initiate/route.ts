@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { captureError } from "@/lib/monitoring/capture-error";
 import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
+import { pickPaymentConfig } from "@/lib/payments/resolve-config";
 import { PENDING_PAYMENT_STALE_AFTER_MS } from "@/lib/payments/constants";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
@@ -54,7 +55,7 @@ export async function POST(req: NextRequest) {
 
     const department = await prisma.department.findUnique({
       where: { slug: input.departmentSlug },
-      include: { paymentConfig: true, academicSession: true },
+      include: { paymentConfig: true, paymentTypeConfigs: true, academicSession: true },
     });
     if (!department) return NextResponse.json({ error: "Department not found" }, { status: 404 });
     if (department.status === "ARCHIVED") {
@@ -64,7 +65,13 @@ export async function POST(req: NextRequest) {
     // secret key, some need a configValue (e.g. Hubtel's merchant account
     // number), some need both. The adapter itself throws a specific error
     // if something it actually requires is missing.
-    if (!department.paymentConfig?.secretKey && !department.paymentConfig?.configValue) {
+    //
+    // Credentials are per student type: freshers and continuing students may
+    // pay into different provider accounts. pickPaymentConfig falls back to
+    // the department's original single config when there's no row for this
+    // type.
+    const activeConfig = pickPaymentConfig(department, input.paymentType);
+    if (!activeConfig?.secretKey && !activeConfig?.configValue) {
       return NextResponse.json({ error: "This department has not configured payments yet" }, { status: 400 });
     }
 
@@ -226,7 +233,7 @@ export async function POST(req: NextRequest) {
         studentId: student.id,
         departmentId: department.id,
         academicSessionId: department.academicSessionId,
-        provider: department.paymentConfig.provider,
+        provider: activeConfig.provider,
         internalReference,
         amount,
         currency: "GHS",
@@ -235,8 +242,8 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    const provider = getPaymentProvider(department.paymentConfig.provider as "PAYSTACK" | "HUBTEL");
-    const paymentConfig = decryptPaymentSecrets(department.paymentConfig);
+    const provider = getPaymentProvider(activeConfig.provider as "PAYSTACK" | "HUBTEL");
+    const paymentConfig = decryptPaymentSecrets(activeConfig);
 
     // The PENDING row above is committed before we ever talk to the
     // provider, so a failure past this point must not leave it behind as a

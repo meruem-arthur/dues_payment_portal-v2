@@ -111,6 +111,7 @@ async function main() {
   await prisma.auditLog.deleteMany();
   await prisma.payment.deleteMany();
   await prisma.student.deleteMany();
+  await prisma.paymentTypeConfiguration.deleteMany();
   await prisma.paymentProviderConfiguration.deleteMany();
   await prisma.smsConfiguration.deleteMany();
   await prisma.emailConfiguration.deleteMany();

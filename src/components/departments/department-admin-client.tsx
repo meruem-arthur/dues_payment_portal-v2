@@ -341,6 +341,9 @@ export function DepartmentAdminClient({ departments, sessions }: { departments: 
   // exists, since the create-department form deliberately only collects
   // the provider + a generic config value and leaves secrets for here.
   const [paymentSettingsDept, setPaymentSettingsDept] = useState<Department | null>(null);
+  // Freshers and continuing students can pay into different provider
+  // accounts, so the modal edits one student type's credentials at a time.
+  const [paymentType, setPaymentType] = useState<"FRESHER" | "CONTINUING">("FRESHER");
   const [paymentForm, setPaymentForm] = useState(emptyPaymentForm);
   const [paymentMeta, setPaymentMeta] = useState<{ hasSecretKey: boolean; hasWebhookSecret: boolean } | null>(null);
   const [paymentLoading, setPaymentLoading] = useState(false);
@@ -660,15 +663,14 @@ export function DepartmentAdminClient({ departments, sessions }: { departments: 
     }
   }
 
-  async function openPaymentSettings(dept: Department) {
-    setPaymentSettingsDept(dept);
+  async function loadPaymentConfig(deptId: string, type: "FRESHER" | "CONTINUING") {
     setPaymentForm(emptyPaymentForm);
     setPaymentMeta(null);
     setPaymentError(null);
     setPaymentSaved(false);
     setPaymentLoading(true);
     try {
-      const res = await fetch(`/api/departments/${dept.id}/payment-config`);
+      const res = await fetch(`/api/departments/${deptId}/payment-config?type=${type}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setPaymentError(data.error ?? "Could not load payment configuration");
@@ -693,8 +695,21 @@ export function DepartmentAdminClient({ departments, sessions }: { departments: 
     }
   }
 
+  async function openPaymentSettings(dept: Department) {
+    setPaymentSettingsDept(dept);
+    setPaymentType("FRESHER");
+    await loadPaymentConfig(dept.id, "FRESHER");
+  }
+
+  async function switchPaymentType(type: "FRESHER" | "CONTINUING") {
+    if (!paymentSettingsDept || type === paymentType || paymentSaving) return;
+    setPaymentType(type);
+    await loadPaymentConfig(paymentSettingsDept.id, type);
+  }
+
   function closePaymentSettings() {
     setPaymentSettingsDept(null);
+    setPaymentType("FRESHER");
     setPaymentForm(emptyPaymentForm);
     setPaymentMeta(null);
     setPaymentError(null);
@@ -712,6 +727,7 @@ export function DepartmentAdminClient({ departments, sessions }: { departments: 
       // ones the admin actually typed something into, so re-saving after
       // rotating just one credential can't wipe the others.
       const body: Record<string, string> = {
+        paymentType,
         provider: paymentForm.provider,
         environment: paymentForm.environment,
       };
@@ -1071,10 +1087,36 @@ export function DepartmentAdminClient({ departments, sessions }: { departments: 
               <p className="text-sm text-muted">{paymentSettingsDept.name}</p>
             </div>
 
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                {(
+                  [
+                    ["FRESHER", "Freshers"],
+                    ["CONTINUING", "Continuing students"],
+                  ] as const
+                ).map(([type, label]) => (
+                  <button
+                    key={type}
+                    type="button"
+                    disabled={paymentLoading || paymentSaving}
+                    onClick={() => switchPaymentType(type)}
+                    className={paymentType === type ? "admin-btn-primary" : "admin-btn-secondary"}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted">
+                These credentials are used only for{" "}
+                {paymentType === "FRESHER" ? "fresher" : "continuing-student"} payments. Switching tabs discards
+                unsaved changes; the other group keeps its own credentials.
+              </p>
+            </div>
+
             {paymentError && <p className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-400">{paymentError}</p>}
             {paymentSaved && !paymentError && (
               <p className="rounded-md bg-emerald-950 px-3 py-2 text-sm text-emerald-400">
-                Payment configuration saved.
+                {paymentType === "FRESHER" ? "Freshers" : "Continuing students"} payment configuration saved.
               </p>
             )}
 

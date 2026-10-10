@@ -174,6 +174,7 @@ model Department {
   payments             Payment[]
   receipts             Receipt[]
   paymentConfig        PaymentProviderConfiguration?
+  paymentTypeConfigs   PaymentTypeConfiguration[]
   smsConfig            SmsConfiguration?
   emailConfig          EmailConfiguration?
   auditLogs            AuditLog[]
@@ -372,6 +373,37 @@ model PaymentProviderConfiguration {
   updatedAt DateTime @updatedAt
 
   @@map("payment_provider_configurations")
+}
+
+// Per-student-type payment credentials. A department can collect fresher dues
+// and continuing-student dues into two different provider accounts: each row
+// holds a full set of credentials for ONE PaymentType. The older
+// PaymentProviderConfiguration (one row per department) is kept as the
+// fallback for any department/type that has no row here - see
+// src/lib/payments/resolve-config.ts, the only place that decides which one
+// applies.
+model PaymentTypeConfiguration {
+  id            String              @id @default(cuid())
+  departmentId  String
+  department    Department          @relation(fields: [departmentId], references: [id])
+  paymentType   PaymentType
+
+  provider      PaymentProviderType @default(PAYSTACK)
+  environment   ProviderEnvironment @default(TEST)
+
+  // Same storage rules as PaymentProviderConfiguration: secretKey and
+  // webhookSecret are encrypted at rest (src/lib/crypto/field-encryption.ts)
+  // and never returned to the frontend.
+  publicKey     String?
+  secretKey     String?
+  webhookSecret String?
+  configValue   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([departmentId, paymentType])
+  @@map("payment_type_configurations")
 }
 
 model SmsConfiguration {

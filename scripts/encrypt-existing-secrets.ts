@@ -1,4 +1,5 @@
-// One-off migration helper: encrypts any PaymentProviderConfiguration
+// One-off migration helper: encrypts any PaymentProviderConfiguration /
+// PaymentTypeConfiguration
 // secretKey/webhookSecret and SmsConfiguration apiKey that are still
 // stored as legacy plaintext (i.e. don't already start with "enc:v1:").
 //
@@ -30,6 +31,22 @@ async function main() {
     }
     if (Object.keys(data).length > 0) {
       await prisma.paymentProviderConfiguration.update({ where: { id: config.id }, data });
+      paymentConfigsUpdated++;
+    }
+  }
+
+  // Per-student-type credentials (same encryption rules).
+  const typeConfigs = await prisma.paymentTypeConfiguration.findMany();
+  for (const config of typeConfigs) {
+    const data: { secretKey?: string; webhookSecret?: string } = {};
+    if (config.secretKey && !isEncrypted(config.secretKey)) {
+      data.secretKey = encryptSecret(config.secretKey);
+    }
+    if (config.webhookSecret && !isEncrypted(config.webhookSecret)) {
+      data.webhookSecret = encryptSecret(config.webhookSecret);
+    }
+    if (Object.keys(data).length > 0) {
+      await prisma.paymentTypeConfiguration.update({ where: { id: config.id }, data });
       paymentConfigsUpdated++;
     }
   }

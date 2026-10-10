@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
 import { confirmSuccessfulPayment } from "@/lib/payments/confirm-payment";
+import { pickPaymentConfig } from "@/lib/payments/resolve-config";
 import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
 
 /**
@@ -15,7 +16,9 @@ import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
  * 1. Read raw body (needed for signature verification - do not re-serialize).
  * 2. Parse payload to find which department this event belongs to (via our
  *    own internalReference/metadata, since Paystack accounts are per-department).
- * 3. Load that department's webhook secret and verify the signature.
+ * 3. Load the credentials for that payment's department AND student type
+ *    (freshers / continuing students may use different accounts) and verify
+ *    the signature.
  * 4. Look up the pending Payment by internalReference.
  * 5. Idempotency: insert a WebhookEvent row with a unique (provider, providerEventId)
  *    constraint. If it already exists, acknowledge 200 and do nothing further.
@@ -43,16 +46,21 @@ export async function POST(req: NextRequest) {
   // since metadata could theoretically be stripped by some gateways.
   const pendingPayment = await prisma.payment.findUnique({
     where: { internalReference },
-    include: { department: { include: { paymentConfig: true, smsConfig: true } } },
+    include: { department: { include: { paymentConfig: true, paymentTypeConfigs: true, smsConfig: true } } },
   });
 
   const department = pendingPayment?.department;
-  if (!department || !department.paymentConfig) {
+  // Credentials depend on the payment's student type (freshers and continuing
+  // students can pay into different accounts), so the signature is checked
+  // against the keys of the account THIS payment was made to. The type comes
+  // from our own stored Payment row, never from the webhook body.
+  const activeConfig = department && pendingPayment ? pickPaymentConfig(department, pendingPayment.paymentType) : null;
+  if (!pendingPayment || !department || !activeConfig) {
     return NextResponse.json({ error: "Unknown transaction / department" }, { status: 404 });
   }
 
-  const provider = getPaymentProvider(department.paymentConfig.provider as "PAYSTACK" | "HUBTEL");
-  const paymentConfig = decryptPaymentSecrets(department.paymentConfig);
+  const provider = getPaymentProvider(activeConfig.provider as "PAYSTACK" | "HUBTEL");
+  const paymentConfig = decryptPaymentSecrets(activeConfig);
 
   const validSignature = provider.verifyWebhookSignature(rawBody, signature, {
     publicKey: paymentConfig.publicKey,
@@ -73,7 +81,7 @@ export async function POST(req: NextRequest) {
       data: {
         departmentId: department.id,
         paymentId: pendingPayment.id,
-        provider: department.paymentConfig.provider,
+        provider: activeConfig.provider,
         providerEventId: parsed.providerEventId,
         rawPayload: parsedPreview,
         processed: false,
@@ -90,7 +98,7 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) {
     await prisma.payment.update({ where: { id: pendingPayment.id }, data: { status: "FAILED" } });
     await prisma.webhookEvent.updateMany({
-      where: { provider: department.paymentConfig.provider, providerEventId: parsed.providerEventId },
+      where: { provider: activeConfig.provider, providerEventId: parsed.providerEventId },
       data: { processed: true },
     });
     return NextResponse.json({ received: true });
@@ -122,7 +130,7 @@ export async function POST(req: NextRequest) {
   });
 
   await prisma.webhookEvent.updateMany({
-    where: { provider: department.paymentConfig.provider, providerEventId: parsed.providerEventId },
+    where: { provider: activeConfig.provider, providerEventId: parsed.providerEventId },
     data: { processed: true },
   });
 

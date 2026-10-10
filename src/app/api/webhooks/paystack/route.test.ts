@@ -97,6 +97,51 @@ beforeEach(() => {
 });
 
 describe("POST /api/webhooks/paystack", () => {
+  it("verifies the signature and the transaction with the credentials of the payment's own student type", async () => {
+    mockedPrisma.payment.findUnique.mockResolvedValue({
+      ...pendingPayment,
+      paymentType: "CONTINUING",
+      department: {
+        ...pendingPayment.department,
+        paymentTypeConfigs: [
+          { paymentType: "FRESHER", provider: "PAYSTACK", publicKey: "pk_f", secretKey: "sk_fresher", webhookSecret: "wh_f", environment: "LIVE" },
+          { paymentType: "CONTINUING", provider: "PAYSTACK", publicKey: "pk_c", secretKey: "sk_continuing", webhookSecret: "wh_c", environment: "LIVE" },
+        ],
+      },
+    } as any);
+
+    const res = await POST(makeRequest(rawPayload));
+
+    expect(res.status).toBe(200);
+    expect(providerMock.verifyWebhookSignature).toHaveBeenCalledWith(
+      expect.any(String),
+      "valid-sig",
+      expect.objectContaining({ secretKey: "sk_continuing", webhookSecret: "wh_c" })
+    );
+    expect(providerMock.verifyTransaction).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ secretKey: "sk_continuing" })
+    );
+    expect(mockedConfirm).toHaveBeenCalled();
+  });
+
+  it("falls back to the department's original config when the payment's type has no row of its own", async () => {
+    mockedPrisma.payment.findUnique.mockResolvedValue({
+      ...pendingPayment,
+      paymentType: "FRESHER",
+      department: { ...pendingPayment.department, paymentTypeConfigs: [] },
+    } as any);
+
+    const res = await POST(makeRequest(rawPayload));
+
+    expect(res.status).toBe(200);
+    expect(providerMock.verifyWebhookSignature).toHaveBeenCalledWith(
+      expect.any(String),
+      "valid-sig",
+      expect.objectContaining({ secretKey: "sk", webhookSecret: "wh_secret" })
+    );
+  });
+
   it("confirms the payment (status + receipt + background notifications) on a valid, verified event", async () => {
     const res = await POST(makeRequest(rawPayload));
     const data = await res.json();

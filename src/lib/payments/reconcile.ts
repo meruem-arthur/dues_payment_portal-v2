@@ -3,6 +3,7 @@ import { logAudit } from "@/lib/audit";
 import { captureError } from "@/lib/monitoring/capture-error";
 import { decryptPaymentSecrets } from "@/lib/crypto/field-encryption";
 import { getPaymentProvider } from "@/lib/payments/provider-factory";
+import { pickPaymentConfig } from "@/lib/payments/resolve-config";
 import { confirmSuccessfulPayment } from "@/lib/payments/confirm-payment";
 
 /**
@@ -36,7 +37,7 @@ export async function reconcilePayment(
 ): Promise<ReconcileOutcome> {
   const payment = await prisma.payment.findUnique({
     where: { id: paymentId },
-    include: { department: { include: { paymentConfig: true } }, receipt: true },
+    include: { department: { include: { paymentConfig: true, paymentTypeConfigs: true } }, receipt: true },
   });
 
   if (!payment) return { outcome: "SKIPPED", reason: "Payment not found" };
@@ -62,7 +63,9 @@ export async function reconcilePayment(
     return { outcome: "SKIPPED", reason: `Payment is ${payment.status}` };
   }
 
-  const config = payment.department.paymentConfig;
+  // Same per-student-type resolution the webhooks use, so a payment is always
+  // verified against the account it was actually made to.
+  const config = pickPaymentConfig(payment.department, payment.paymentType);
   if (!config) return { outcome: "SKIPPED", reason: "No payment provider configured for this department" };
 
   // Hubtel verifies by ITS transaction id, which we only learn from a

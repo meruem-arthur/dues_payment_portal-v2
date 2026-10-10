@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { captureError } from "@/lib/monitoring/capture-error";
 import { prisma } from "@/lib/db";
 import { requireSuperAdmin, UnauthorizedError, ForbiddenError } from "@/lib/authorization";
-import { paymentProviderConfigUpdateSchema } from "@/lib/validations/department";
+import { paymentProviderConfigUpdateSchema, paymentTypeSchema } from "@/lib/validations/department";
 import { logAudit } from "@/lib/audit";
 import { encryptSecret } from "@/lib/crypto/field-encryption";
 
@@ -15,10 +15,16 @@ import { encryptSecret } from "@/lib/crypto/field-encryption";
 // the real secretKey/publicKey/webhookSecret are added afterward here, which
 // is also the only place they can be rotated once set.
 //
+// Credentials are kept per student type (FRESHER / CONTINUING) in
+// PaymentTypeConfiguration so the two groups can pay into different provider
+// accounts. GET/PATCH take a paymentType; a type with no row of its own shows
+// (and starts from) the department's original single config, which is also
+// what payments fall back to - see src/lib/payments/resolve-config.ts.
+//
 // Only SUPER_ADMIN may read or write this - department admins should never
 // see or manage the raw provider secret key for their own department.
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   try {
     await requireSuperAdmin();
 
@@ -30,25 +36,28 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       return NextResponse.json({ error: "Department not found" }, { status: 404 });
     }
 
-    const config = await prisma.paymentProviderConfiguration.findUnique({
+    const typeParam = req.nextUrl.searchParams.get("type");
+    const paymentType = typeParam ? paymentTypeSchema.parse(typeParam) : undefined;
+
+    const legacy = await prisma.paymentProviderConfiguration.findUnique({
       where: { departmentId: params.id },
     });
+    const typed = paymentType
+      ? await prisma.paymentTypeConfiguration.findUnique({
+          where: { departmentId_paymentType: { departmentId: params.id, paymentType } },
+        })
+      : null;
+
+    // With a type: that type's own row, or the department's original config
+    // when it has none yet (the same fallback payments use). Without a type:
+    // the original config, as before.
+    const config = typed ?? legacy;
 
     // Secrets are never sent to the client. The frontend only learns
     // whether a given secret has been set, not its value, so it can show
     // e.g. "Secret key is set - leave blank to keep it" placeholder text.
     return NextResponse.json({
-      config: config
-        ? {
-            provider: config.provider,
-            environment: config.environment,
-            publicKey: config.publicKey ?? "",
-            configValue: config.configValue ?? "",
-            hasSecretKey: Boolean(config.secretKey),
-            hasWebhookSecret: Boolean(config.webhookSecret),
-            updatedAt: config.updatedAt,
-          }
-        : null,
+      config: config ? serializeConfig(config) : null,
     });
   } catch (err) {
     return handleError(err);
@@ -84,9 +93,21 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     const secretIfProvided = (v: string | undefined) => (v ? v : undefined);
     const encryptedSecretIfProvided = (v: string | undefined) => (v ? encryptSecret(v) : undefined);
 
-    const existing = await prisma.paymentProviderConfiguration.findUnique({
+    const legacy = await prisma.paymentProviderConfiguration.findUnique({
       where: { departmentId: params.id },
     });
+
+    // Which credential set is being edited. With a paymentType it's that
+    // type's own row; if the type has none yet, the edit starts from the
+    // department's original config (so untouched fields keep their current
+    // values and nothing is lost) and creates the type's row. Without a
+    // paymentType it's the original single config, as before.
+    const typedExisting = parsed.paymentType
+      ? await prisma.paymentTypeConfiguration.findUnique({
+          where: { departmentId_paymentType: { departmentId: params.id, paymentType: parsed.paymentType } },
+        })
+      : null;
+    const existing = typedExisting ?? legacy;
 
     const data = {
       provider: parsed.provider ?? existing?.provider ?? "PAYSTACK",
@@ -97,11 +118,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       configValue: secretIfProvided(parsed.configValue) ?? existing?.configValue ?? null,
     };
 
-    const config = await prisma.paymentProviderConfiguration.upsert({
-      where: { departmentId: params.id },
-      create: { departmentId: params.id, ...data },
-      update: data,
-    });
+    const paymentType = parsed.paymentType;
+    const config = paymentType
+      ? await prisma.paymentTypeConfiguration.upsert({
+          where: { departmentId_paymentType: { departmentId: params.id, paymentType } },
+          create: { departmentId: params.id, paymentType, ...data },
+          update: data,
+        })
+      : await prisma.paymentProviderConfiguration.upsert({
+          where: { departmentId: params.id },
+          create: { departmentId: params.id, ...data },
+          update: data,
+        });
 
     // Never write secret values into the audit log - only which fields
     // changed and the non-secret provider/environment selection.
@@ -109,9 +137,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       userId: user.id,
       departmentId: params.id,
       action: "PAYMENT_CONFIG_UPDATED",
-      entity: "PaymentProviderConfiguration",
+      entity: paymentType ? "PaymentTypeConfiguration" : "PaymentProviderConfiguration",
       entityId: config.id,
       metadata: {
+        paymentType: paymentType ?? null,
         provider: config.provider,
         environment: config.environment,
         publicKeyChanged: Boolean(parsed.publicKey),
@@ -121,20 +150,32 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       },
     });
 
-    return NextResponse.json({
-      config: {
-        provider: config.provider,
-        environment: config.environment,
-        publicKey: config.publicKey ?? "",
-        configValue: config.configValue ?? "",
-        hasSecretKey: Boolean(config.secretKey),
-        hasWebhookSecret: Boolean(config.webhookSecret),
-        updatedAt: config.updatedAt,
-      },
-    });
+    return NextResponse.json({ config: serializeConfig(config) });
   } catch (err) {
     return handleError(err);
   }
+}
+
+// The only shape ever sent to the browser: secrets are reported as
+// set/not-set, never returned.
+function serializeConfig(config: {
+  provider: string;
+  environment: string;
+  publicKey: string | null;
+  configValue: string | null;
+  secretKey: string | null;
+  webhookSecret: string | null;
+  updatedAt: Date;
+}) {
+  return {
+    provider: config.provider,
+    environment: config.environment,
+    publicKey: config.publicKey ?? "",
+    configValue: config.configValue ?? "",
+    hasSecretKey: Boolean(config.secretKey),
+    hasWebhookSecret: Boolean(config.webhookSecret),
+    updatedAt: config.updatedAt,
+  };
 }
 
 function handleError(err: unknown) {

@@ -107,7 +107,13 @@ export type AcademicSessionInput = z.infer<typeof academicSessionSchema>;
 // handler for the "blank means don't touch this field" convention
 // applied to the secret-bearing fields.
 // ------------------------------------------------------------
+export const paymentTypeSchema = z.enum(["FRESHER", "CONTINUING"]);
+
 export const paymentProviderConfigUpdateSchema = z.object({
+  // Which student type's credentials this update applies to. The admin form
+  // always sends it; when omitted the department's original single config is
+  // updated (kept for API compatibility - that row is only the fallback now).
+  paymentType: paymentTypeSchema.optional(),
   provider: z.enum(["PAYSTACK", "HUBTEL"]).optional(),
   environment: z.enum(["TEST", "LIVE"]).optional(),
   publicKey: z.string().trim().max(500).optional(),

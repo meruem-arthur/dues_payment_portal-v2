@@ -336,6 +336,74 @@ describe("POST /api/payments/initiate", () => {
   });
 });
 
+describe("POST /api/payments/initiate - separate credentials per student type", () => {
+  const fresherConfig = {
+    paymentType: "FRESHER", provider: "PAYSTACK", environment: "LIVE",
+    publicKey: "pk_fresher", secretKey: "sk_fresher", webhookSecret: "wh_fresher", configValue: "ACCT_fresher",
+  };
+  const continuingConfig = {
+    paymentType: "CONTINUING", provider: "PAYSTACK", environment: "LIVE",
+    publicKey: "pk_cont", secretKey: "sk_cont", webhookSecret: "wh_cont", configValue: "ACCT_cont",
+  };
+
+  function mockProvider() {
+    const initiatePayment = vi.fn().mockResolvedValue({ authorizationUrl: "https://pay.example/abc", providerReference: "ref" });
+    mockedGetPaymentProvider.mockReturnValue({
+      name: "PAYSTACK", initiatePayment, verifyTransaction: vi.fn(), verifyWebhookSignature: vi.fn(), parseWebhookPayload: vi.fn(),
+    } as any);
+    return initiatePayment;
+  }
+
+  it("pays a continuing student into the continuing account", async () => {
+    mockedPrisma.department.findUnique.mockResolvedValue({
+      ...baseDepartment, paymentTypeConfigs: [fresherConfig, continuingConfig],
+    } as any);
+    const initiatePayment = mockProvider();
+
+    const res = await POST(makeRequest(validBody)); // paymentType: CONTINUING
+
+    expect(res.status).toBe(200);
+    expect(initiatePayment.mock.calls[0][1]).toMatchObject({ secretKey: "sk_cont", configValue: "ACCT_cont", publicKey: "pk_cont" });
+  });
+
+  it("pays a fresher into the fresher account", async () => {
+    mockedPrisma.department.findUnique.mockResolvedValue({
+      ...baseDepartment, paymentTypeConfigs: [fresherConfig, continuingConfig],
+    } as any);
+    mockedPrisma.student.findFirst.mockResolvedValue({ ...baseStudent, level: "L100" } as any);
+    const initiatePayment = mockProvider();
+
+    const res = await POST(makeRequest({ ...validBody, paymentType: "FRESHER" }));
+
+    expect(res.status).toBe(200);
+    expect(initiatePayment.mock.calls[0][1]).toMatchObject({ secretKey: "sk_fresher", configValue: "ACCT_fresher", publicKey: "pk_fresher" });
+  });
+
+  it("falls back to the department's original config for a type with no row of its own", async () => {
+    mockedPrisma.department.findUnique.mockResolvedValue({
+      ...baseDepartment, paymentTypeConfigs: [fresherConfig], // continuing not split out
+    } as any);
+    const initiatePayment = mockProvider();
+
+    const res = await POST(makeRequest(validBody)); // CONTINUING
+
+    expect(res.status).toBe(200);
+    expect(initiatePayment.mock.calls[0][1]).toMatchObject({ secretKey: "sk_test_123" });
+  });
+
+  it("reports payments as not configured when that type's own row has no credentials", async () => {
+    mockedPrisma.department.findUnique.mockResolvedValue({
+      ...baseDepartment,
+      paymentTypeConfigs: [{ ...continuingConfig, secretKey: null, configValue: null }],
+    } as any);
+
+    const res = await POST(makeRequest(validBody)); // CONTINUING
+
+    expect(res.status).toBe(400);
+    expect(mockedPrisma.payment.create).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/payments/initiate - Dues Cleared students", () => {
   it("hard-blocks a cleared student before any payment record or provider call", async () => {
     mockedPrisma.student.findFirst.mockResolvedValue({ ...baseStudent, isExempt: true } as any);
