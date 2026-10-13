@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { requireAuth, requireDepartmentAccess, UnauthorizedError, ForbiddenError } from "@/lib/authorization";
 import { studentSchema } from "@/lib/validations/student";
 import { logAudit } from "@/lib/audit";
+import { deleteStudentWithPaymentAttempts } from "@/lib/students/delete-student";
 
 // GET is used purely to populate the edit form. It performs NO mutation.
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
@@ -80,10 +81,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
 export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const existing = await prisma.student.findUniqueOrThrow({ where: { id: params.id } });
+    await requireAuth();
+    const existing = await prisma.student.findUnique({ where: { id: params.id } });
+    if (!existing) return NextResponse.json({ error: "Student not found" }, { status: 404 });
     const user = await requireDepartmentAccess(existing.departmentId);
 
-    await prisma.student.delete({ where: { id: params.id } });
+    const result = await deleteStudentWithPaymentAttempts(existing, user.id);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.message, code: result.code }, { status: 409 });
+    }
 
     await logAudit({
       userId: user.id,
@@ -91,10 +97,10 @@ export async function DELETE(req: NextRequest, { params }: { params: { id: strin
       action: "STUDENT_DELETED",
       entity: "Student",
       entityId: params.id,
-      metadata: { referenceNumber: existing.referenceNumber },
+      metadata: { referenceNumber: existing.referenceNumber, deletedPayments: result.deletedPayments },
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, deletedPayments: result.deletedPayments });
   } catch (err) {
     return handleError(err);
   }

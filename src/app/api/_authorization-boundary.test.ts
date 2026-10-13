@@ -100,7 +100,7 @@ describe("GET/PATCH/DELETE /api/students/[id] - cross-department", () => {
 
   it("DELETE rejects deleting a student belonging to a different department", async () => {
     asDeptAAdmin();
-    mockedPrisma.student.findUniqueOrThrow.mockResolvedValue(foreignStudent as any);
+    mockedPrisma.student.findUnique.mockResolvedValue(foreignStudent as any);
 
     const res = await deleteStudent(new NextRequest("http://localhost/api/students/student_1", { method: "DELETE" }), {
       params: { id: "student_1" },

@@ -176,10 +176,32 @@ export function StudentManager({
     fetchStudents();
   }
 
-  async function deleteStudent(id: string) {
-    if (!confirm("Delete this student? This cannot be undone.")) return;
-    await fetch(`/api/students/${id}`, { method: "DELETE" });
-    fetchStudents();
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<{ id: string; text: string } | null>(null);
+
+  async function deleteStudent(student: Student) {
+    if (
+      !confirm(
+        `Delete ${student.fullName}? Any unpaid payment attempts will be deleted with them. This can't be undone.`
+      )
+    ) {
+      return;
+    }
+    setDeletingId(student.id);
+    setDeleteError(null);
+    try {
+      const res = await fetch(`/api/students/${student.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setDeleteError({ id: student.id, text: data.error ?? "Could not delete this student" });
+        return;
+      }
+      fetchStudents();
+    } catch {
+      setDeleteError({ id: student.id, text: "Network error - could not delete this student" });
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -526,6 +548,9 @@ export function StudentManager({
                   {cancelError?.id === s.id && (
                     <p className="mt-1 text-xs text-red-400">{cancelError.text}</p>
                   )}
+                  {deleteError?.id === s.id && (
+                    <p className="mt-1 text-xs text-red-400">{deleteError.text}</p>
+                  )}
                   {resendResult?.id === s.id && (
                     <p className="mt-1 text-xs text-muted">{resendResult.text}</p>
                   )}
@@ -610,7 +635,13 @@ export function StudentManager({
                     </button>
                   )}
                   <button className="text-accent hover:underline" onClick={() => openEditDialog(s)}>Edit</button>
-                  <button className="text-red-400 hover:underline" onClick={() => deleteStudent(s.id)}>Delete</button>
+                  <button
+                    className="text-red-400 hover:underline disabled:opacity-50"
+                    disabled={deletingId === s.id}
+                    onClick={() => deleteStudent(s)}
+                  >
+                    {deletingId === s.id ? "Deleting..." : "Delete"}
+                  </button>
                 </td>
               </tr>
             ))}
