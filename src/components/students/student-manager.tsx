@@ -69,6 +69,8 @@ export function StudentManager({
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  const [total, setTotal] = useState<number | null>(null);
+
   const fetchStudents = useCallback(async () => {
     setLoading(true);
     setFetchError(null);
@@ -88,6 +90,7 @@ export function StudentManager({
         return;
       }
       setStudents(data.students ?? []);
+      setTotal(typeof data.total === "number" ? data.total : (data.students ?? []).length);
     } catch (err) {
       setFetchError(err instanceof Error ? err.message : "Failed to load students (network error)");
       setStudents([]);
@@ -317,12 +320,15 @@ export function StudentManager({
         setResendResult({ id: student.id, text: data.error ?? "Could not resend the receipt" });
         return;
       }
-      const parts: string[] = [];
-      if (data.sms !== "SKIPPED") parts.push(`SMS ${data.sms.toLowerCase()}`);
-      if (data.email !== "SKIPPED") parts.push(`Email ${data.email.toLowerCase()}`);
+      // Always report BOTH channels, with the reason when one didn't send.
+      const describe = (label: string, status: string, reason?: string) =>
+        status === "SKIPPED" ? `${label} not sent${reason ? ` (${reason})` : ""}` : `${label} ${status.toLowerCase()}`;
       setResendResult({
         id: student.id,
-        text: parts.length ? parts.join(", ") : data.emailReason ?? "Nothing to resend (SMS/email disabled or no email on file)",
+        text:
+          data.sms === "SKIPPED" && data.smsReason === undefined
+            ? describe("Email", data.email, data.emailReason)
+            : `${describe("SMS", data.sms, data.smsReason)}; ${describe("Email", data.email, data.emailReason)}`,
       });
     } finally {
       setResendingId(null);
@@ -474,6 +480,15 @@ export function StudentManager({
 
       {bulkResult && <p className="rounded-md bg-white/5 px-3 py-2 text-sm text-muted">{bulkResult}</p>}
       {exportError && <p className="rounded-md bg-red-950 px-3 py-2 text-sm text-red-400">{exportError}</p>}
+
+      {!loading && !fetchError && total !== null && (
+        <p className="text-sm text-muted">
+          <span className="font-semibold text-admin-text">{total.toLocaleString()}</span>{" "}
+          {total === 1 ? "student" : "students"}
+          {(search || levelFilter || statusFilter || sourceFilter || exemptFilter) && " match the current filters"}
+          {total > students.length && ` (showing the first ${students.length.toLocaleString()})`}
+        </p>
+      )}
 
       <div className="admin-card overflow-x-auto">
         <table className="w-full text-sm">

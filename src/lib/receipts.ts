@@ -128,7 +128,7 @@ export async function issueReceiptAndNotify(paymentId: string) {
  * This is what runs in the background after a payment is confirmed, and
  * what the admin "Resend Receipt" button calls.
  */
-export async function sendReceiptNotifications(paymentId: string) {
+export async function sendReceiptNotifications(paymentId: string, opts: { force?: boolean } = {}) {
   const payment = await prisma.payment.findUniqueOrThrow({
     where: { id: paymentId },
     include: {
@@ -143,20 +143,27 @@ export async function sendReceiptNotifications(paymentId: string) {
     throw new Error("Cannot send a receipt for a payment that hasn't succeeded yet");
   }
 
-  const results: { sms: "SENT" | "FAILED" | "SKIPPED"; email: "SENT" | "FAILED" | "SKIPPED" } = {
+  const results: {
+    sms: "SENT" | "FAILED" | "SKIPPED";
+    email: "SENT" | "FAILED" | "SKIPPED";
+    smsReason?: string;
+    emailReason?: string;
+  } = {
     sms: "SKIPPED",
     email: "SKIPPED",
   };
 
   try {
-    results.sms = (await sendSmsReceipt(payment, payment.receipt.receiptNumber)) ?? "SKIPPED";
+    results.sms = (await sendSmsReceipt(payment, payment.receipt.receiptNumber, opts)) ?? "SKIPPED";
+    if (results.sms === "SKIPPED") results.smsReason = smsSkipReason(payment, opts);
   } catch (e) {
     results.sms = "FAILED";
     captureError(e, { context: "sms-receipt", paymentId: payment.id });
   }
 
   try {
-    results.email = (await sendEmailReceipt(payment, payment.receipt.receiptNumber, payment.receipt.issuedAt)) ?? "SKIPPED";
+    results.email = (await sendEmailReceipt(payment, payment.receipt.receiptNumber, payment.receipt.issuedAt, opts)) ?? "SKIPPED";
+    if (results.email === "SKIPPED") results.emailReason = emailSkipReason(payment, opts);
   } catch (e) {
     results.email = "FAILED";
     captureError(e, { context: "email-receipt", paymentId: payment.id });
@@ -171,7 +178,32 @@ export async function sendReceiptNotifications(paymentId: string) {
  * fixing a typo'd phone/email an admin needs a way to send it again).
  */
 export async function resendReceipt(paymentId: string) {
-  return sendReceiptNotifications(paymentId);
+  // force: an admin pressing "Resend" wants BOTH channels to go out, so the
+  // department's automatic-send on/off toggles are bypassed here. A channel
+  // can still be skipped if it's impossible (no SMS config, no phone/email
+  // on file) - the reason is returned so the UI can say why.
+  return sendReceiptNotifications(paymentId, { force: true });
+}
+
+function smsSkipReason(
+  payment: { department: { smsConfig: { enabled: boolean } | null } },
+  opts: { force?: boolean }
+) {
+  if (!payment.department.smsConfig) return "SMS is not set up for this department";
+  if (!payment.department.smsConfig.enabled && !opts.force) return "SMS receipts are turned off for this department";
+  return "SMS was not sent";
+}
+
+function emailSkipReason(
+  payment: { student: { email: string | null }; department: { emailConfig: { enabled: boolean } | null } },
+  opts: { force?: boolean }
+) {
+  if (!payment.student.email) return "This student has no email address on file";
+  if (!payment.department.emailConfig && !opts.force) return "Email receipts are not set up for this department";
+  if (payment.department.emailConfig && !payment.department.emailConfig.enabled && !opts.force) {
+    return "Email receipts are turned off for this department";
+  }
+  return "Email was not sent";
 }
 
 async function sendSmsReceipt(
@@ -182,10 +214,11 @@ async function sendSmsReceipt(
       smsConfig: { senderId: string; messageTemplate: string; enabled: boolean; apiKey: string | null; username: string | null } | null;
     };
   },
-  receiptNumber: string
+  receiptNumber: string,
+  opts: { force?: boolean } = {}
 ) {
   const smsConfig = payment.department.smsConfig;
-  if (!smsConfig || !smsConfig.enabled) return "SKIPPED" as const;
+  if (!smsConfig || (!smsConfig.enabled && !opts.force)) return "SKIPPED" as const;
 
   // Student.level is stored as "L100".."L400" (see prisma schema) - drop
   // the leading "L" so the SMS reads "Level : 300" as requested, not "L300".
@@ -234,6 +267,9 @@ async function sendSmsReceipt(
   return "FAILED" as const;
 }
 
+const DEFAULT_EMAIL_TEMPLATE =
+  "Dear {name}, your payment of {amount} for {department} was successful. Reference: {reference}. Receipt: {receipt}.";
+
 async function sendEmailReceipt(
   payment: Awaited<ReturnType<typeof prisma.payment.findUniqueOrThrow>> & {
     student: { fullName: string; referenceNumber: string; email: string | null; level: string };
@@ -249,18 +285,22 @@ async function sendEmailReceipt(
     };
   },
   receiptNumber: string,
-  issuedAt: Date
+  issuedAt: Date,
+  opts: { force?: boolean } = {}
 ) {
   const emailConfig = payment.department.emailConfig;
   // Two independent conditions gate this, both required: the department
   // must have turned email receipts on, AND this particular student must
   // have an email on file (it's an optional field collected at checkout).
-  if (!emailConfig || !emailConfig.enabled || !payment.student.email) return "SKIPPED" as const;
+  // A manual resend (force) bypasses the department's on/off toggle, and
+  // falls back to the default template if no email settings exist yet.
+  if (!payment.student.email) return "SKIPPED" as const;
+  if (!opts.force && (!emailConfig || !emailConfig.enabled)) return "SKIPPED" as const;
 
   const amountNumber = Number(payment.amount);
   const amountDisplay = Number.isInteger(amountNumber) ? amountNumber.toString() : amountNumber.toFixed(2);
 
-  const body = emailConfig.emailTemplate
+  const body = (emailConfig?.emailTemplate ?? DEFAULT_EMAIL_TEMPLATE)
     .replace("{name}", payment.student.fullName)
     .replace("{department}", payment.department.name)
     .replace("{amount}", amountDisplay)
@@ -295,7 +335,7 @@ async function sendEmailReceipt(
     to: payment.student.email,
     subject: `${payment.department.name} dues receipt - ${receiptNumber}`,
     body,
-    from: emailConfig.fromAddress ?? undefined,
+    from: emailConfig?.fromAddress ?? undefined,
     attachments,
   });
 
@@ -465,7 +505,7 @@ export async function sendClearanceEmail(studentId: string): Promise<ClearanceEm
     to: student.email,
     subject: `${student.department.name} dues clearance - ${receipt.receiptNumber}`,
     body,
-    from: emailConfig.fromAddress ?? undefined,
+    from: emailConfig?.fromAddress ?? undefined,
     attachments,
   });
 

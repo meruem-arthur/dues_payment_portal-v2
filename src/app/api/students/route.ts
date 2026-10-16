@@ -14,14 +14,19 @@ export async function GET(req: NextRequest) {
     const where = buildStudentWhere(user, readStudentFilterParams(searchParams));
 
     if (user.role === "DEPARTMENT_ADMIN" && !user.departmentId) {
-      return NextResponse.json({ students: [] });
+      return NextResponse.json({ students: [], total: 0 });
     }
 
-    const students = await prisma.student.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      take: 500,
-    });
+    // `total` is the true number matching the current filters - the list
+    // below is capped at 500 rows, so its length alone can undercount.
+    const [students, total] = await Promise.all([
+      prisma.student.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: 500,
+      }),
+      prisma.student.count({ where }),
+    ]);
 
     // Flag which of these students currently has a PENDING payment sitting
     // against them - this is what the "Cancel Pending Payment" action in
@@ -57,7 +62,7 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json({ students: studentsWithPendingFlag });
+    return NextResponse.json({ students: studentsWithPendingFlag, total });
   } catch (err) {
     return handleError(err);
   }
