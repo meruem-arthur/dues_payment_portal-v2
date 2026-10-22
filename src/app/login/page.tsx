@@ -33,7 +33,16 @@ export default function LoginPage() {
     }
 
     setSuccess(true);
-    router.push("/dashboard");
+    // Resume where the person was heading (e.g. the finance portal handoff),
+    // but only for same-site paths - never an absolute or protocol-relative URL.
+    const requested = new URLSearchParams(window.location.search).get("callbackUrl");
+    const safeTarget = requested && requested.startsWith("/") && !requested.startsWith("//") ? requested : "/dashboard";
+    // API routes (like the finance handoff) redirect off-site, so they need a full page load.
+    if (safeTarget.startsWith("/api/")) {
+      window.location.assign(safeTarget);
+      return;
+    }
+    router.push(safeTarget);
     router.refresh();
   }
 

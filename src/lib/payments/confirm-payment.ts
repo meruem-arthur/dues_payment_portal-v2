@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { runInBackground } from "@/lib/background";
 import { issueReceipt, sendReceiptNotifications } from "@/lib/receipts";
+import { queueFinancePush } from "@/lib/finance/push";
 
 /**
  * The single place a payment becomes SUCCESS.
@@ -40,6 +41,11 @@ export async function confirmSuccessfulPayment(
       failureReason: null,
     },
   });
+
+  // Real-time income for the finance portal: only the caller that actually
+  // flipped the payment announces it. A no-op unless the finance integration
+  // is configured.
+  if (claim.count > 0) queueFinancePush(paymentId);
 
   const { receipt, created } = await issueReceipt(paymentId);
 

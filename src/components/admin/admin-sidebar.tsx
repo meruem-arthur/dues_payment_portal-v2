@@ -11,6 +11,7 @@ import {
   Settings,
   LogOut,
   Zap,
+  Wallet,
   Menu,
   X,
 } from "lucide-react";
@@ -26,7 +27,7 @@ const navItems: NavItem[] = [
   { href: "/settings", label: "Account Settings", icon: <Settings size={18} /> },
 ];
 
-export function AdminSidebar({ userName, role }: { userName: string; role: string }) {
+export function AdminSidebar({ userName, role, financeEnabled = false }: { userName: string; role: string; financeEnabled?: boolean }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
@@ -68,6 +69,14 @@ export function AdminSidebar({ userName, role }: { userName: string; role: strin
               </Link>
             );
           })}
+        {financeEnabled && (
+          // Plain anchor, not <Link>: this is an API route that redirects to the
+          // finance portal, so it must be a full navigation.
+          <a href="/api/finance/sso" className="admin-nav-link">
+            <Wallet size={18} />
+            Finance Portal
+          </a>
+        )}
       </nav>
 
       <div className="mt-4 border-t border-[#2a2338] pt-4">
