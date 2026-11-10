@@ -24,9 +24,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     if (student.isExempt) {
       return NextResponse.json({ error: "This student is already marked Dues Cleared" }, { status: 409 });
     }
-    if (student.level === "L100") {
-      return NextResponse.json({ error: "Level 100 students cannot be marked Dues Cleared" }, { status: 400 });
-    }
     const blockingPayment = await prisma.payment.findFirst({
       where: { studentId: student.id, status: { in: ["SUCCESS", "PENDING"] } },
       select: { status: true },

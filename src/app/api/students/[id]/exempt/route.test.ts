@@ -96,11 +96,11 @@ describe("POST /api/students/[id]/exempt", () => {
     expect(mockedPrisma.student.update).not.toHaveBeenCalled();
   });
 
-  it("refuses a Level 100 student", async () => {
+  it("allows a Level 100 student to be marked Dues Cleared", async () => {
     mockedPrisma.student.findUniqueOrThrow.mockResolvedValue({ ...student, level: "L100" } as any);
     const res = await POST(post(), ctx);
-    expect(res.status).toBe(400);
-    expect(mockedPrisma.student.update).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(mockedPrisma.student.update).toHaveBeenCalled();
   });
 
   it("refuses a student who has already paid", async () => {

@@ -610,7 +610,7 @@ export function StudentManager({
                       {cancellingId === s.id ? "Cancelling..." : "Cancel Pending Payment"}
                     </button>
                   )}
-                  {isSuperAdmin && !s.isExempt && s.level !== "L100" && s.paymentStatus !== "SUCCESS" && !s.hasPendingPayment && (
+                  {isSuperAdmin && !s.isExempt && s.paymentStatus !== "SUCCESS" && !s.hasPendingPayment && (
                     <button
                       className="text-sky-400 hover:underline disabled:opacity-50"
                       onClick={() => markDuesCleared(s)}
